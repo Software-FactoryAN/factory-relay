@@ -4,7 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading;
 
-// Desk self-test for Encoder.cs: real software MFT with a synthetic NV12 sequence. Exit 0 = every check passed.
+// Desk self-test for Encoder.cs and the software side of EncoderAsync.cs: real software MFT with a synthetic NV12 sequence. Exit 0 = every check passed.
 //   EncoderSelfTest.exe <out.h264>
 static class EncoderSelfTest
 {
@@ -40,7 +40,44 @@ static class EncoderSelfTest
         Check(bad(641, 360, 30, 4000000) && bad(640, 361, 30, 4000000) && bad(0, 0, 30, 4000000) && bad(-160, 120, 30, 4000000), "odd and non-positive canvas rejected");
         Check(bad(640, 360, 0, 4000000) && bad(640, 360, -30, 4000000) && bad(1920, 1088, 255, 4000000) && bad(640, 360, int.MaxValue, 4000000), "frame rate and level bound rejected");
         Check(bad(640, 360, 30, 0) && bad(640, 360, 30, 1499999) && bad(640, 360, 30, 8000001), "bitrate range rejected");
-        Check(Throws<NotSupportedException>(() => new H264Encoder(new EncoderConfig(640, 360, 30, 4000000, true))), "hardware flag refused");
+    }
+
+    // Paths that need no GPU: fallback by injected fault, session-limit mapping, event mapping, SetBitrate arguments.
+    static void Fallback()
+    {
+        try
+        {
+            H264Encoder.TestHardwareFault = 1;
+            using (var e = new H264Encoder(new EncoderConfig(640, 360, 30, 4000000, true)))
+            {
+                var s = e.ReadSettings(); int n = 0;
+                for (int i = 0; i < 30; i++) n += e.Encode(Frame(i), i * 10000000L / Fps).Count;
+                n += e.Drain().Count;
+                Check(!s.Hardware && s.FallbackReason != null && n == 30, "no hardware MFT: software fallback, reason '" + s.FallbackReason + "', 30 AUs");
+            }
+            Check(Throws<EncoderException>(() => new H264Encoder(new EncoderConfig(640, 360, 30, 4000000, true, false))) && H264Encoder.LiveHardwareSessions == 0, "no hardware MFT and no fallback allowed throws, no session held");
+            H264Encoder.TestHardwareFault = 2;
+            using (var e = new H264Encoder(new EncoderConfig(160, 120, 30, 4000000, true)))
+            {
+                var s = e.ReadSettings();
+                Check(!s.Hardware && s.FallbackReason != null && H264Encoder.LiveHardwareSessions == 0, "every activate fails: fallback names the stage, session released ('" + s.FallbackReason + "')");
+            }
+        }
+        finally { H264Encoder.TestHardwareFault = 0; }
+        Check(H264Encoder.IsSessionLimit(unchecked((int)0xC00D6D76)) && !H264Encoder.IsSessionLimit(unchecked((int)0x80004005)), "driver session refusal code recognised");
+        Check(H264Encoder.EventFault(601, 0) == 0 && H264Encoder.EventFault(602, 0) == 0 && H264Encoder.EventFault(604, 0) == 0 && H264Encoder.EventFault(1, 0) != 0 && H264Encoder.EventFault(605, 0) != 0 && H264Encoder.EventFault(601, -5) == -5, "event failures map to an HRESULT, healthy events do not");
+        using (var e = new H264Encoder(new EncoderConfig(W, H, Fps)))
+        {
+            Check(!e.ReadSettings().Hardware, "default config uses the software MFT");
+            foreach (int bad in new[] { 0, -1, 1499999, 8000001 }) Check(Throws<ArgumentOutOfRangeException>(() => e.SetBitrate(bad)) && e.Config.BitrateBps == 4000000, "SetBitrate " + bad + " rejected, config unchanged");
+            e.SetBitrate(2000000);
+            Check(e.Config.BitrateBps == 2000000 && e.ReadSettings().MeanBitRateBps == 2000000u, "SetBitrate on the software path reads back");
+            Check(Throws<InvalidOperationException>(() => { Exception x = null; var th = new Thread(() => { try { e.SetBitrate(3000000); } catch (Exception ex) { x = ex; } }); th.Start(); th.Join(); if (x != null) throw x; }), "SetBitrate on other thread rejected");
+            e.Drain();
+            Check(Throws<InvalidOperationException>(() => e.SetBitrate(3000000)), "SetBitrate after drain rejected");
+        }
+        var d = new H264Encoder(new EncoderConfig(W, H, Fps)); d.Dispose();
+        Check(Throws<ObjectDisposedException>(() => d.SetBitrate(3000000)), "SetBitrate after dispose rejected");
     }
 
     static int Run(string outPath)
@@ -116,7 +153,7 @@ static class EncoderSelfTest
 
     static int Main(string[] args)
     {
-        try { Validation(); Run(args.Length > 0 ? args[0] : "h1.h264"); Settings(); Prepend(); Hygiene(); }
+        try { Validation(); Fallback(); Run(args.Length > 0 ? args[0] : "h1.h264"); Settings(); Prepend(); Hygiene(); }
         catch (Exception e) { Console.WriteLine("FAIL unexpected " + e); return 2; }
         Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
         return failures == 0 ? 0 : 1;

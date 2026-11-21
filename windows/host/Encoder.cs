@@ -5,7 +5,7 @@ using System.Threading;
 
 // H.264 encoder core for the host: Microsoft software MFT, synchronous, system-memory NV12 in, Annex-B access units out.
 // Settings follow the Annular encoder (low latency, CBR, no B-frames, long GOP, packed NV12 rows, ForceKeyFrame as VT_UI4).
-// One thread owns an instance. The hardware MFT, async events and live bitrate are a later slice and extend this partial class.
+// One thread owns an instance. The hardware MFT, async events and live bitrate are in EncoderAsync.cs (same partial class).
 public sealed class EncoderException : Exception
 {
     public readonly int HResultCode; public readonly string Stage;
@@ -17,9 +17,9 @@ public sealed class EncoderConfig
     public const int MinWidth = 160, MaxWidth = 1920, MinHeight = 120, MaxHeight = 1088;
     public const int DefaultBitrateBps = 4000000, MinBitrateBps = 1500000, MaxBitrateBps = 8000000;
     public const long MaxMacroblocksPerSecond = 2073600L; // H.264 level 5.2
-    public int Width, Height, Fps, BitrateBps; public bool PreferHardware;
-    public EncoderConfig(int width, int height, int fps, int bitrateBps = DefaultBitrateBps, bool preferHardware = false)
-    { Width = width; Height = height; Fps = fps; BitrateBps = bitrateBps; PreferHardware = preferHardware; }
+    public int Width, Height, Fps, BitrateBps; public bool PreferHardware, AllowSoftwareFallback;
+    public EncoderConfig(int width, int height, int fps, int bitrateBps = DefaultBitrateBps, bool preferHardware = false, bool allowSoftwareFallback = true)
+    { Width = width; Height = height; Fps = fps; BitrateBps = bitrateBps; PreferHardware = preferHardware; AllowSoftwareFallback = allowSoftwareFallback; }
 }
 
 public sealed class AccessUnit
@@ -110,7 +110,7 @@ public sealed partial class H264Encoder : IDisposable
     const int MessageDrain = 1, MessageBegin = 0x10000000, MessageEnd = 0x10000001, VtBool = 11, VtUi4 = 19, FrameMultiple = 2;
     const int ENotAccepting = unchecked((int)0xC00D36B5), ENeedMoreInput = unchecked((int)0xC00D6D72), EBufferTooSmall = unchecked((int)0xC00D36B1), EStreamChange = unchecked((int)0xC00D6D61);
     const int EInvalidArg = unchecked((int)0x80070057), ENotImpl = unchecked((int)0x80004001), ENotFound = unchecked((int)0x80070490);
-    enum State { Open, Drained, Disposed }
+    enum State { Open, Drained, Faulted, Disposed }
 
     public readonly EncoderConfig Config;
     IMFTransform t; ICodecAPI api; State state; bool mfStarted; readonly int owner, fps;
@@ -123,12 +123,7 @@ public sealed partial class H264Encoder : IDisposable
         try
         {
             Need("MFStartup", MFStartup(0x00020070, 0)); mfStarted = true;
-            Guid clsid = ClsidSoftware, iid = IidTransform; IntPtr obj;
-            Need("CoCreateInstance", CoCreateInstance(ref clsid, IntPtr.Zero, 1, ref iid, out obj));
-            t = (IMFTransform)Marshal.GetObjectForIUnknown(obj); Marshal.Release(obj);
-            api = t as ICodecAPI;
-            if (api == null) throw new EncoderException("ICodecAPI", ENotImpl, "encoder does not expose ICodecAPI");
-            Configure();
+            if (config.PreferHardware) OpenHardware(); else OpenSoftware();
         }
         catch { Dispose(); throw; }
     }
@@ -137,7 +132,6 @@ public sealed partial class H264Encoder : IDisposable
     {
         if (c == null) throw new ArgumentNullException("config");
         if (IntPtr.Size != 8) throw new PlatformNotSupportedException("the VARIANT layout used here is x64");
-        if (c.PreferHardware) throw new NotSupportedException("hardware encoder is not part of this build");
         if (c.Width < EncoderConfig.MinWidth || c.Width > EncoderConfig.MaxWidth || c.Height < EncoderConfig.MinHeight || c.Height > EncoderConfig.MaxHeight) throw new ArgumentOutOfRangeException("config", "canvas outside 160x120..1920x1088");
         if (((c.Width | c.Height) & 1) != 0) throw new ArgumentException("canvas dimensions must be even", "config");
         if (c.Fps < 1 || ((c.Width + 15) / 16) * ((c.Height + 15) / 16) * (long)c.Fps > EncoderConfig.MaxMacroblocksPerSecond) throw new ArgumentOutOfRangeException("config", "frame rate beyond the level 5.2 macroblock rate");
@@ -267,9 +261,10 @@ public sealed partial class H264Encoder : IDisposable
     public List<AccessUnit> Encode(byte[] nv12, long ptsHns)
     {
         Guard();
-        if (state != State.Open) throw new InvalidOperationException("encoder is drained");
+        if (state != State.Open) throw new InvalidOperationException("encoder is not open (drained or faulted)");
         if (nv12 == null) throw new ArgumentNullException("nv12");
         if (nv12.Length != zeros.Length) throw new ArgumentException("expected " + zeros.Length + " packed NV12 bytes", "nv12");
+        if (events != null) return EncodeAsync(nv12, ptsHns);
         var result = new List<AccessUnit>();
         IntPtr sp = NewSample(Math.Max(zeros.Length * FrameMultiple, inSize), nv12, ptsHns);
         try
@@ -291,14 +286,15 @@ public sealed partial class H264Encoder : IDisposable
     public void ForceKeyFrame()
     {
         Guard();
-        if (state != State.Open) throw new InvalidOperationException("encoder is drained");
+        if (state != State.Open) throw new InvalidOperationException("encoder is not open (drained or faulted)");
         Need("ForceKeyFrame", SetApi(ApiForceKey, VtUi4, 1));
     }
 
     public List<AccessUnit> Drain()
     {
         Guard();
-        if (state != State.Open) throw new InvalidOperationException("encoder is drained");
+        if (state != State.Open) throw new InvalidOperationException("encoder is not open (drained or faulted)");
+        if (events != null) return DrainAsync();
         var result = new List<AccessUnit>();
         Need("Drain", t.ProcessMessage(MessageDrain, IntPtr.Zero));
         while (Output(result)) { }
@@ -385,8 +381,8 @@ public sealed partial class H264Encoder : IDisposable
         if (t != null)
         {
             try { t.ProcessMessage(MessageEnd, IntPtr.Zero); } catch (Exception) { }
-            Marshal.FinalReleaseComObject(t); t = null; api = null;
         }
+        DropMft(); ReleaseHardware();
         if (mfStarted) { MFShutdown(); mfStarted = false; }
     }
 }

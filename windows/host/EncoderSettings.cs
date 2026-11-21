@@ -5,7 +5,7 @@ public sealed class EncoderSettings
 {
     public string MftName, TypeOrder; public bool? LowLatency;
     public uint? RateControlMode, MeanBitRateBps, BPictureCount, GopSize;
-    public int BPictureHr, SequenceHeaderBytes;
+    public int BPictureHr, SequenceHeaderBytes; public bool Hardware; public string VendorId, FallbackReason;
     public uint OutputProfile, OutputWidth, OutputHeight, OutputFpsNum, OutputFpsDen, OutputAvgBitrate, InputStride;
 }
 
@@ -34,7 +34,7 @@ public sealed partial class H264Encoder
     public EncoderSettings ReadSettings()
     {
         Guard();
-        var r = new EncoderSettings { MftName = "Microsoft H.264 Video Encoder MFT (software)", TypeOrder = typeOrder, BPictureHr = bpHr };
+        var r = new EncoderSettings { MftName = mftName, TypeOrder = typeOrder, BPictureHr = bpHr, Hardware = hardware, VendorId = vendorId, FallbackReason = fallbackReason };
         ulong? v = GetApi(ApiLowLatency); r.LowLatency = v.HasValue ? v.Value != 0 : (bool?)null;
         v = GetApi(ApiRateControl); r.RateControlMode = v.HasValue ? (uint)v.Value : (uint?)null;
         v = GetApi(ApiBitrate); r.MeanBitRateBps = v.HasValue ? (uint)v.Value : (uint?)null;
