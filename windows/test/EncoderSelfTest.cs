@@ -77,6 +77,29 @@ static class EncoderSelfTest
         return all.Count;
     }
 
+    static void Settings()
+    {
+        using (var enc = new H264Encoder(new EncoderConfig(W, H, Fps)))
+        {
+            var r = enc.ReadSettings();
+            Check(r.LowLatency == true && (r.RateControlMode == 0 || r.RateControlMode == 4) && r.MeanBitRateBps == 4000000u && r.GopSize == (uint)(Fps * 600), "settings read back: low latency, CBR/LowDelayVBR, 4 Mbit/s, GOP " + r.GopSize);
+            Check(r.OutputProfile == 77 && r.OutputWidth == W && r.OutputHeight == H && r.OutputFpsNum == Fps && r.OutputFpsDen == 1 && r.InputStride == W, "type read back: Main, 640x360 at 30/1, stride 640");
+            Check(Throws<InvalidOperationException>(() => { Exception e = null; var th = new Thread(() => { try { enc.ReadSettings(); } catch (Exception x) { e = x; } }); th.Start(); th.Join(); if (e != null) throw e; }), "ReadSettings on other thread rejected");
+        }
+    }
+
+    static void Prepend()
+    {
+        byte[] hdr = { 0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 2 }, idr = { 0, 0, 0, 1, 0x65, 9 }, full = { 0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 2, 0, 0, 0, 1, 0x65, 9 };
+        bool ok = true; AccessUnit au = null;
+        try { au = H264Encoder.Finish(idr, 5, hdr); } catch (Exception) { ok = false; }
+        Check(ok && au.PrependedSps && au.Keyframe && Nals(au.Data).Count == 3 && au.Data.Length == hdr.Length + idr.Length, "IDR without SPS/PPS gets the sequence header");
+        au = H264Encoder.Finish(full, 5, hdr);
+        Check(!au.PrependedSps && au.Data.Length == full.Length, "in-band SPS/PPS is not duplicated");
+        Check(Throws<EncoderException>(() => H264Encoder.Finish(idr, 5, null)), "IDR without SPS/PPS and no header throws");
+        Check(Throws<EncoderException>(() => H264Encoder.Finish(new byte[] { 1, 2, 3, 4, 5 }, 5, hdr)), "non Annex-B payload throws");
+    }
+
     static void Hygiene()
     {
         using (var e = new H264Encoder(new EncoderConfig(160, 120, 30))) { e.Encode(Frame160(), 0); e.Drain(); }
@@ -93,7 +116,7 @@ static class EncoderSelfTest
 
     static int Main(string[] args)
     {
-        try { Validation(); Run(args.Length > 0 ? args[0] : "h1.h264"); Hygiene(); }
+        try { Validation(); Run(args.Length > 0 ? args[0] : "h1.h264"); Settings(); Prepend(); Hygiene(); }
         catch (Exception e) { Console.WriteLine("FAIL unexpected " + e); return 2; }
         Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
         return failures == 0 ? 0 : 1;
