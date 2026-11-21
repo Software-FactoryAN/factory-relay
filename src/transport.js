@@ -20,6 +20,7 @@ export async function loadConfig(file) {
 
 export function run(config, name, input) {
   const args = parseOperation(name, input);
+  if (['acquire', 'release'].includes(name) && args.target && config.platform !== 'windows') throw new Error('invalid_arguments');
   const request = JSON.stringify({ operation: name, args, owner: config.owner, workspace: config.workspace, timeout: config.timeoutSeconds });
   const command = remoteCommand(config, 'helper');
   const transportArgs = config.transport === 'factory'

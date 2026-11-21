@@ -146,6 +146,7 @@ export async function executeTask(broker, actor, name, args) {
         broker.target = targetIdentity(selected);
         broker.targetProcessStartedAt = broker.windows.find(w => sameTarget(w, selected))?.processStartedAt;
         if (!isDesktop(selected) && selected.bundleId !== sampleBundle && !Number.isFinite(broker.targetProcessStartedAt)) throw new Error('target_identity_required');
+        await broker.leaseFor(broker.target);
         broker.launch();
       }
       if (!await broker.waitFrame(0, 15000)) throw new Error('live_frame_required');
@@ -157,10 +158,10 @@ export async function executeTask(broker, actor, name, args) {
     } catch (error) {
       if (!hadOwner && !broker.current()) {
         await broker.halt();
-        const lease = broker.lease;
+        const lease = broker.lease, leaseTarget = broker.leaseTarget;
         broker.lease = null; broker.owner = null; broker.observation = null; broker.connection = 'disconnected';
         if (lease) {
-          try { await broker.native.release(lease); }
+          try { await broker.native.release(lease, leaseTarget); }
           catch { broker.error = 'release_unconfirmed'; }
         }
       }
@@ -186,10 +187,10 @@ export async function executeTask(broker, actor, name, args) {
     }
     if (broker.owner?.actor === actor && (!broker.current() || broker.owner.runId === args.runId)) {
       await broker.halt();
-      const lease = broker.lease; broker.owner = null; broker.observation = null; broker.lease = null;
+      const lease = broker.lease, leaseTarget = broker.leaseTarget; broker.owner = null; broker.observation = null; broker.lease = null;
       broker.connection = 'disconnected';
       if (lease) {
-        try { await broker.native.release(lease); }
+        try { await broker.native.release(lease, leaseTarget); }
         catch { broker.error = 'release_unconfirmed'; }
       }
     }

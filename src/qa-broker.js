@@ -35,10 +35,12 @@ export function nativeAdapter(config) {
   if (config.transport !== 'factory') throw new Error('factory_transport_required');
   const applications = applicationProfiles(config.applications);
   const owner = { ...config, owner: 'qa:' + opaque() };
+  const perTarget = config.platform === 'windows';
   return {
     applications,
-    acquire: (takeover, ttlSeconds = 3600) => run(owner, 'acquire', { ttlSeconds, takeover }),
-    release: lease => run(owner, 'release', { lease }),
+    perTarget,
+    acquire: (takeover, ttlSeconds = 3600, target) => run(owner, 'acquire', { ttlSeconds, takeover, ...(perTarget && target ? { target } : {}) }),
+    release: (lease, target) => run(owner, 'release', { lease, ...(perTarget && target ? { target } : {}) }),
     windows: async lease => {
       if (!nativeAuthorized(applications)) return { windows: [], displays: [] };
       let windows = [], displays = [];
@@ -76,6 +78,7 @@ export class Broker {
     this.queue = Promise.resolve();
     this.pending = 0;
     this.connection = 'disconnected';
+    this.leaseTarget = null;
     this.owner = null;
     this.windows = [];
     this.displays = [];
@@ -220,16 +223,29 @@ export class Broker {
     this.queue = task.catch(() => {}).finally(() => { this.pending--; });
     return task;
   }
-  async rotate(takeover) {
+  async rotate(takeover, target = this.target) {
     await this.halt();
     this.owner = null;
     this.observation = null;
+    const leaseTarget = this.native.perTarget && target ? targetIdentity(target) : null;
     try {
-      const value = await this.native.acquire(takeover);
+      if (this.lease && this.leaseTarget !== leaseTarget && !sameTarget(this.leaseTarget, leaseTarget)) {
+        const old = this.lease;
+        this.lease = null;
+        try { await this.native.release(old, this.leaseTarget); } catch {}
+      }
+      const value = leaseTarget ? await this.native.acquire(takeover, undefined, leaseTarget) : await this.native.acquire(takeover);
       this.lease = { token: value.token, generation: value.generation };
+      this.leaseTarget = leaseTarget;
       this.connection = 'connected';
       this.error = null;
-    } catch (e) { this.lease = null; this.disconnected(safeError(e)); throw e; }
+    } catch (e) { this.lease = null; this.leaseTarget = null; this.disconnected(safeError(e)); throw e; }
+  }
+  /** Per-target hosts verify a lease for the selected target, so a lease taken for another key is replaced. */
+  async leaseFor(target) {
+    if (!this.native.perTarget || !this.lease) return;
+    const wanted = targetIdentity(target), owner = this.owner;
+    if (this.leaseTarget === null || !sameTarget(this.leaseTarget, wanted)) { await this.rotate(false, wanted); this.owner = owner; }
   }
   async refreshTargets(lease) {
     const found = await this.native.windows(lease);
@@ -272,7 +288,7 @@ export class Broker {
       if (this.current()) throw new Error('run_active');
       if (this.owner) throw new Error('release_control_before_connect');
       requireNativeAuthorization(this.applications);
-      if (!this.lease) await this.rotate(false);
+      if (!this.lease) await this.rotate(false, null);
       await this.halt();
       try {
         await this.refreshTargets(this.lease);
@@ -293,7 +309,7 @@ export class Broker {
         this.observation = null;
         const lease = this.lease;
         this.lease = null;
-        try { await this.native.release(lease); }
+        try { await this.native.release(lease, this.leaseTarget); }
         catch (e) { this.disconnected(safeError(e)); throw e; }
       }
       await this.rotate(args.takeover);
@@ -312,6 +328,7 @@ export class Broker {
       this.target = args.target;
       this.targetProcessStartedAt = started;
       this.observation = null;
+      try { await this.leaseFor(args.target); } catch (e) { this.disconnected(safeError(e)); throw e; }
       this.launch();
       return this.status();
     }
@@ -325,7 +342,7 @@ export class Broker {
       const lease = this.lease;
       this.lease = null;
       try {
-        await this.native.release(lease);
+        await this.native.release(lease, this.leaseTarget);
         await this.rotate(false);
         this.launch();
       } catch (e) { this.disconnected(safeError(e)); throw e; }
@@ -470,7 +487,7 @@ export class Broker {
     try {
       if (this.current()) this.store.finish(this.active, 'interrupted', 'broker_shutdown');
     } finally {
-      if (this.lease) { try { await this.native.release(this.lease); } catch {} }
+      if (this.lease) { try { await this.native.release(this.lease, this.leaseTarget); } catch {} }
       this.store.close();
     }
   }
