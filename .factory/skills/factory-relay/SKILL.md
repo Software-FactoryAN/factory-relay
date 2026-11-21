@@ -12,7 +12,8 @@ keyboard input remain unsupported.
 
 ## Launch and doctor
 
-Read the [Software-FactoryAN/factory-relay README](../../../README.md) for setup,
+Read the [repository agent notes](../../../AGENTS.md) and
+[Software-FactoryAN/factory-relay README](../../../README.md) for setup,
 launch commands and current limits. If your task includes submitting a PR,
 follow the [merge queue instructions](../../../docs/merge-queue.md).
 Use the available `agent-browser` skill for the embedded Factory pane and

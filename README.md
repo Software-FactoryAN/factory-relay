@@ -8,7 +8,8 @@ remain available. All selected-display content is private local evidence; review
 it before sharing.
 **iOS input and keyboard/type input are not supported by this slice.**
 
-Pull requests into `main` follow the [GitHub merge queue instructions](docs/merge-queue.md).
+For agent guidance, see [AGENTS.md](AGENTS.md). Pull requests into `main` follow
+the [GitHub merge queue instructions](docs/merge-queue.md).
 
 ## Requirements
 
