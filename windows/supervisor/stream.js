@@ -202,7 +202,8 @@ export async function runStream({ stdin = process.stdin, stdout = process.stdout
   const socket = await connect(endpoint, Math.min(end, Date.now() + STEP_TIMEOUT_MS));
   const host = new Reader(socket);
   const closeHost = () => socket.destroy();
-  stdin.once('close', closeHost);
+  // Only a stream needs the client; windows and diagnose answer once even if the client already closed stdin.
+  if (request.mode === 'stream') stdin.once('close', closeHost);
   try {
     checkHello(await host.line(1024, Math.min(end, Date.now() + STEP_TIMEOUT_MS)));
     authorize(root, request);
