@@ -1,8 +1,11 @@
 # GitHub merge queue
 
-Pull requests into `main` in [factory-relay] and [droid-mobile] go through
-GitHub's merge queue. Both require `ci-gate` and do not require PR branches
-to be up to date with `main`.
+The GitHub merge queue flow for PRs into `main` is the same in [factory-relay],
+[droid-mobile], and [Annular]: the required check is `ci-gate`, and PR branches
+do not need to be up to date with `main` once the queue is enabled.
+
+Annular's strict up-to-date checks still apply until its queue is enabled
+after [PR #895](https://github.com/Software-FactoryAN/Annular/pull/895) merges.
 
 Use **Merge when ready** on the GitHub pull request, or request it with:
 
@@ -19,10 +22,6 @@ conflicts if GitHub reports them. The queue tests the PR with the latest
 In factory-relay, the [test workflow](../.github/workflows/test.yml) runs on
 `pull_request` and `merge_group` so `ci-gate` reports for both the PR and the
 queued merge group.
-
-[Annular] requires `ci-gate`, but its `main` ruleset still requires PR branches
-to be up to date and does not enable the merge queue. Follow the queue workflow
-there once the merge queue is enabled and the up-to-date requirement is removed.
 
 [factory-relay]: https://github.com/Software-FactoryAN/factory-relay
 [Annular]: https://github.com/Software-FactoryAN/Annular
