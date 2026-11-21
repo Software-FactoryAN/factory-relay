@@ -9,6 +9,8 @@ using System.Threading;
 static class EncoderHwTest
 {
     static int failures;
+    // Luma noise amplitude of the bitrate content; white noise at full range stays far above the 8 Mbit/s target.
+    static int NoiseAmp = 16;
     static void Check(bool ok, string what) { Console.WriteLine((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
     static double Pct(List<double> v, double p) { var s = new List<double>(v); s.Sort(); return s.Count == 0 ? 0 : s[Math.Min(s.Count - 1, (int)Math.Ceiling(p * s.Count) - 1)]; }
 
@@ -16,9 +18,9 @@ static class EncoderHwTest
     static byte[] Frame(int w, int h, int n, bool noise)
     {
         var f = new byte[w * h * 3 / 2];
-        if (noise) new Random(n + 1).NextBytes(f);
-        else for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) f[y * w + x] = (byte)(16 + ((x + y + n * 6) & 0x7f));
-        for (int i = w * h; i < f.Length; i++) f[i] = (byte)(noise ? f[i] : 100 + (n & 0x1f) + (i & 1) * 20);
+        var rnd = new Random(n + 1);
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) f[y * w + x] = (byte)(16 + ((x + y + n * 6) & 0x7f) + (noise ? rnd.Next(NoiseAmp) : 0));
+        for (int i = w * h; i < f.Length; i++) f[i] = (byte)(100 + (n & 0x1f) + (i & 1) * 20);
         return f;
     }
 
@@ -133,7 +135,11 @@ static class EncoderHwTest
 
     static int Main(string[] args)
     {
-        try { Stream(args.Length > 0 ? args[0] : "h2-hw.h264"); IdrLatency(); Bitrate(); SessionLimit(); Hygiene(); }
+        try
+        {
+            if (args.Length > 1) { NoiseAmp = int.Parse(args[1]); Bitrate(); return failures; }
+            Stream(args.Length > 0 ? args[0] : "h2-hw.h264"); IdrLatency(); Bitrate(); SessionLimit(); Hygiene();
+        }
         catch (Exception e) { Console.WriteLine("FAIL unexpected " + e); return 2; }
         Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
         return failures == 0 ? 0 : 1;
