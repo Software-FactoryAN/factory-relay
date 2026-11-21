@@ -312,6 +312,12 @@ public sealed partial class H264Encoder : IDisposable
             if ((outFlags & 0x100) == 0) { own = NewSample(outSize, null, 0); odb.Sample = own; }
             uint status; int hr = t.ProcessOutput(0, 1, ref odb, out status);
             if (odb.Events != IntPtr.Zero) Marshal.Release(odb.Events);
+            if (hr == 0 && (odb.Sample == IntPtr.Zero || (odb.Status & 0x300) == 0x300))
+            {
+                // S_OK with only events and no sample (MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE): nothing to read.
+                if (odb.Sample != IntPtr.Zero) Marshal.Release(odb.Sample);
+                return false;
+            }
             if (hr == 0)
             {
                 try { result.Add(ReadSample(odb.Sample)); } finally { Marshal.Release(odb.Sample); }
@@ -319,7 +325,7 @@ public sealed partial class H264Encoder : IDisposable
             }
             if (own != IntPtr.Zero) Marshal.Release(own);
             if (hr == ENeedMoreInput) return false;
-            if (hr == EStreamChange && ++changes <= 4) { Renegotiate(); continue; }
+            if (hr == EStreamChange && ++changes <= 4) { Renegotiate(); if (events != null) return false; continue; } // an async MFT answers ProcessOutput only after its next HaveOutput event
             if (hr == EBufferTooSmall && tries < 8 && outSize < (64 << 20)) { outSize *= 2; continue; }
             throw new EncoderException("ProcessOutput", hr, "output failed");
         }

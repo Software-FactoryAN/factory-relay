@@ -107,12 +107,13 @@ public sealed partial class H264Encoder
             {
                 IntPtr p = Marshal.ReadIntPtr(acts, i * IntPtr.Size);
                 activate = (IMFActivate)Marshal.GetObjectForIUnknown(p);
-                string name = ReadString(activate, MftFriendlyName);
-                try { StartHardware(); opened = true; mftName = string.IsNullOrEmpty(name) ? "hardware H.264 encoder MFT (unnamed)" : name; vendorId = ReadString(activate, MftVendorId); }
+                string name = ReadString(activate, MftFriendlyName), vendor = ReadString(activate, MftVendorId);
+                try { StartHardware(); opened = true; mftName = string.IsNullOrEmpty(name) ? "hardware H.264 encoder MFT (unnamed)" : name; vendorId = vendor; }
                 catch (EncoderException e)
                 {
                     DropMft();
-                    if (IsSessionLimit(e.HResultCode)) throw new EncoderException("SessionLimit", e.HResultCode, "the driver refused another encoder session");
+                    // 0xC00D6D76 is the measured NVIDIA session refusal; on other vendors it may mean something else and only skips that candidate.
+                    if (IsSessionLimit(e.HResultCode) && vendor != null && vendor.IndexOf("VEN_10DE", StringComparison.OrdinalIgnoreCase) >= 0) throw new EncoderException("SessionLimit", e.HResultCode, "the driver refused another encoder session");
                     failures += (failures.Length > 0 ? "; " : "") + (name ?? "unnamed") + ": " + e.Stage + " 0x" + e.HResultCode.ToString("X8"); lastStage = e.Stage; lastHr = e.HResultCode;
                 }
             }
@@ -179,7 +180,7 @@ public sealed partial class H264Encoder
         int bad = EventFault(type, status);
         if (bad != 0) throw new EncoderException("AsyncEvent", bad, "event " + type + " reported failure");
         if (type == EvNeedInput) needInput++;
-        else if (type == EvHaveOutput) { Output(result); if (inFlight > 0) inFlight--; }
+        else if (type == EvHaveOutput) { if (Output(result) && inFlight > 0) inFlight--; }
         else if (type == EvDrainComplete)
         {
             if (!draining) throw new EncoderException("AsyncEvent", EUnexpected, "drain complete outside Drain");

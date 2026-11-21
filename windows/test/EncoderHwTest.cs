@@ -117,6 +117,8 @@ static class EncoderHwTest
         {
             Console.WriteLine("INFO opened " + open.Count + " hardware sessions, then refused with stage " + refused + " 0x" + hr.ToString("X8") + ", live " + H264Encoder.LiveHardwareSessions);
             Check(refused == "SessionLimit" && open.Count <= H264Encoder.MaxHardwareSessions && H264Encoder.LiveHardwareSessions == open.Count, "session limit refused with a code instead of hanging");
+            int aus = 0; foreach (var e in open) { aus += e.Encode(Frame(640, 360, 0, false), 0).Count; aus += e.Drain().Count; }
+            Check(aus == open.Count, "every open session encodes a frame while all are open (" + aus + " AUs from " + open.Count + " sessions)");
             foreach (var e in open) e.Dispose();
         }
         Check(H264Encoder.LiveHardwareSessions == 0, "every session closed, live count 0");
