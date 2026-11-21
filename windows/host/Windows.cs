@@ -10,11 +10,13 @@ using System.Text;
 
 // Window and display list and diagnose for the Windows relay host, in the packet shapes of the Mac host
 // (host/AppletsHost.swift). Process start is Unix seconds, the unit of control/AppletsControl.swift:64.
-static class Windows
+static class WindowList
 {
     const int PacketLimitBytes = 7000, MaxWindows = 100, MaxDisplays = 32, MaxEdgePixels = 16384, MaxNameChars = 80;
-    const uint ProcessQueryLimitedInformation = 0x1000, WsExToolWindow = 0x80, GwOwner = 4, DwmaCloaked = 14;
+    const uint ProcessQueryLimitedInformation = 0x1000, WsExToolWindow = 0x80, GwOwner = 4, DwmaCloaked = 14, DwmaExtendedFrameBounds = 9;
     const long UnixEpochAsFileTimeSeconds = 11644473600;
+
+    internal sealed class Display { public IntPtr Monitor; public uint Id; public string Uuid, Configuration, Row; }
 
     delegate bool WindowProc(IntPtr window, IntPtr data);
     delegate bool MonitorProc(IntPtr monitor, IntPtr dc, IntPtr rect, IntPtr data);
@@ -29,6 +31,7 @@ static class Windows
     }
 
     [DllImport("user32.dll", SetLastError = true)] static extern bool EnumWindows(WindowProc proc, IntPtr data);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint command);
@@ -40,12 +43,13 @@ static class Windows
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMonitorInfoW(IntPtr monitor, ref MonitorInfo info);
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, uint attribute, out int value, int size);
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] static extern int DwmGetRect(IntPtr window, uint attribute, out Rect value, int size);
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr process, out FileTime created, out FileTime exited, out FileTime kernel, out FileTime user);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder name, ref int size);
 
-    static string Text(string value)
+    internal static string Text(string value)
     {
         var json = new StringBuilder("\"");
         foreach (char c in value)
@@ -56,11 +60,33 @@ static class Windows
         }
         return json.Append('"').ToString();
     }
-    static string Number(double value) { return value.ToString("R", CultureInfo.InvariantCulture); }
-    static string Rectangle(double x, double y, double w, double h) { return "[" + Number(x) + "," + Number(y) + "," + Number(w) + "," + Number(h) + "]"; }
+    internal static string Number(double value) { return value.ToString("R", CultureInfo.InvariantCulture); }
+    internal static string Rectangle(double x, double y, double w, double h) { return "[" + Number(x) + "," + Number(y) + "," + Number(w) + "," + Number(h) + "]"; }
+
+    // The visible frame, so the rect matches what Graphics Capture returns and not the invisible resize border.
+    static bool Bounds(IntPtr window, out Rect rect)
+    {
+        return DwmGetRect(window, DwmaExtendedFrameBounds, out rect, Marshal.SizeOf(typeof(Rect))) == 0 || GetWindowRect(window, out rect);
+    }
+
+    // The list filters for one window; false once it is no longer a capturable target of that process.
+    internal static bool Locate(IntPtr window, uint pid, string bundleId, out double startedAt, out double[] rect)
+    {
+        startedAt = 0; rect = null;
+        int cloaked;
+        Rect r;
+        uint owner;
+        if (!IsWindow(window) || !IsWindowVisible(window) || IsIconic(window) || DwmGetWindowAttribute(window, DwmaCloaked, out cloaked, 4) != 0 || cloaked != 0 || !Bounds(window, out r)) return false;
+        GetWindowThreadProcessId(window, out owner);
+        int width = r.Right - r.Left, height = r.Bottom - r.Top;
+        string[] info = owner != pid ? null : Owner(pid, out startedAt);
+        if (info == null || info[1] != bundleId || width < 1 || height < 1 || width > MaxEdgePixels || height > MaxEdgePixels) return false;
+        rect = new double[] { r.Left, r.Top, width, height };
+        return true;
+    }
 
     // Null when the process cannot be read: a window whose owner is unknown is left out, as on the Mac.
-    static string[] Owner(uint pid, out double startedAt)
+    internal static string[] Owner(uint pid, out double startedAt)
     {
         startedAt = 0;
         IntPtr process = OpenProcess(ProcessQueryLimitedInformation, false, pid);
@@ -95,7 +121,7 @@ static class Windows
             uint pid;
             if (rows.Count >= MaxWindows || !IsWindowVisible(window) || IsIconic(window) || GetWindow(window, GwOwner) != IntPtr.Zero ||
                 (GetWindowLongW(window, -20) & WsExToolWindow) != 0 || GetWindowTextLengthW(window) == 0 ||
-                DwmGetWindowAttribute(window, DwmaCloaked, out cloaked, 4) != 0 || cloaked != 0 || !GetWindowRect(window, out rect)) return true;
+                DwmGetWindowAttribute(window, DwmaCloaked, out cloaked, 4) != 0 || cloaked != 0 || !Bounds(window, out rect)) return true;
             long id = window.ToInt64();
             int width = rect.Right - rect.Left, height = rect.Bottom - rect.Top;
             GetWindowThreadProcessId(window, out pid);
@@ -112,9 +138,11 @@ static class Windows
     }
 
     // Display ids and UUIDs are derived from the device name, so they stay stable when the enumeration order changes.
-    static List<string> DisplayRows()
+    static List<string> DisplayRows() { return Displays().ConvertAll(d => d.Row); }
+
+    internal static List<Display> Displays()
     {
-        var rows = new List<string>();
+        var rows = new List<Display>();
         if (!EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (monitor, dc, clip, data) =>
         {
             var info = new MonitorInfo { Size = Marshal.SizeOf(typeof(MonitorInfo)) };
@@ -123,10 +151,13 @@ static class Windows
             if (width < 1 || height < 1 || width > MaxEdgePixels || height > MaxEdgePixels) return true;
             byte[] hash = MD5.Create().ComputeHash(Encoding.UTF8.GetBytes(info.Device));
             uint id = BitConverter.ToUInt32(hash, 0);
-            rows.Add("{\"displayConfiguration\":{\"boundsPoints\":" + Rectangle(info.Monitor.Left, info.Monitor.Top, width, height) +
-                ",\"pixelHeight\":" + height + ",\"pixelWidth\":" + width + ",\"rotation\":0,\"scaleX\":1,\"scaleY\":1}" +
-                ",\"displayId\":" + (id == 0 ? 1 : id) + ",\"displayUUID\":" + Text(new Guid(hash).ToString("D")) +
-                ",\"kind\":\"desktop\",\"main\":" + ((info.Flags & 1) != 0 ? "true" : "false") + "}");
+            if (id == 0) id = 1;
+            string uuid = new Guid(hash).ToString("D");
+            string configuration = "{\"boundsPoints\":" + Rectangle(info.Monitor.Left, info.Monitor.Top, width, height) +
+                ",\"pixelHeight\":" + height + ",\"pixelWidth\":" + width + ",\"rotation\":0,\"scaleX\":1,\"scaleY\":1}";
+            rows.Add(new Display { Monitor = monitor, Id = id, Uuid = uuid, Configuration = configuration,
+                Row = "{\"displayConfiguration\":" + configuration + ",\"displayId\":" + id + ",\"displayUUID\":" + Text(uuid) +
+                ",\"kind\":\"desktop\",\"main\":" + ((info.Flags & 1) != 0 ? "true" : "false") + "}" });
             return true;
         }, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error(), "EnumDisplayMonitors failed");
         return rows;
@@ -148,14 +179,16 @@ static class Windows
         return "{\"displays\":[" + string.Join(",", displays) + "],\"protocol\":1,\"type\":\"windows\",\"windows\":[" + string.Join(",", windows) + "]}";
     }
 
-    static string Diagnostic()
+    static string Diagnostic() { return Diagnostic("permission_preflight", "app_ready"); }
+
+    internal static string Diagnostic(string code, string stage)
     {
         string executable = Process.GetCurrentProcess().MainModule.FileName;
         return "{\"accessibility\":true,\"bundleId\":\"com.factory.applets.host\",\"bundlePath\":" + Text(Path.GetDirectoryName(executable)) +
-            ",\"code\":\"permission_preflight\",\"executablePath\":" + Text(executable) + ",\"launchMode\":\"launchservices-ipc\"" +
+            ",\"code\":\"" + code + "\",\"executablePath\":" + Text(executable) + ",\"launchMode\":\"launchservices-ipc\"" +
             ",\"lifecycle\":{\"appKitInitialized\":true,\"eventLoopRunning\":true,\"launchFinished\":true,\"mainThread\":true}" +
             ",\"permissionRequested\":false,\"processId\":" + Process.GetCurrentProcess().Id + ",\"protocol\":1,\"screenRecording\":true" +
-            ",\"stage\":\"app_ready\",\"type\":\"diagnostic\"}";
+            ",\"stage\":\"" + stage + "\",\"type\":\"diagnostic\"}";
     }
 
     static int Main(string[] args)
@@ -163,6 +196,7 @@ static class Windows
         try
         {
             SetProcessDPIAware();
+            if (args.Length > 0 && args[0] == "stream") return StreamHost.Run(args);
             if (args.Length != 1 || (args[0] != "windows" && args[0] != "diagnose")) throw new ArgumentException("usage: Windows.exe windows|diagnose");
             Console.Out.Write((args[0] == "windows" ? Packet(DisplayRows(), WindowRows()) : Diagnostic()) + "\n");
             return 0;
