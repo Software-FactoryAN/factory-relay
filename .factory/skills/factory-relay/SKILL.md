@@ -12,7 +12,9 @@ keyboard input remain unsupported.
 
 ## Launch and doctor
 
-Read `README.md` in this project for setup, launch commands and current limits.
+Read the [Software-FactoryAN/factory-relay README](../../../README.md) for setup,
+launch commands and current limits. If your task includes submitting a PR,
+follow the [merge queue instructions](../../../docs/merge-queue.md).
 Use the available `agent-browser` skill for the embedded Factory pane and
 `prove-it-works`, if installed, to validate user-visible behavior. It is optional,
 not a runtime dependency. Skills are instructions, not native input drivers.

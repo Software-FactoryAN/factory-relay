@@ -6,8 +6,9 @@ license: MIT
 
 # Set up factory-relay
 
-Read the repository README and setup scripts first. Use the provided setup
-commands, not a second installer or native driver.
+Read the [Software-FactoryAN/factory-relay README](../../../README.md) and setup
+scripts first. Use the provided setup commands, not a second installer or native
+driver.
 
 1. Inspect existing configuration without printing credentials. Identify the
    authorized Mac from Factory's computer list. Ask which Mac to use if ambiguous.
