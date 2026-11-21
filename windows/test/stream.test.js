@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decodeStream, HEADER_LIMIT, IMAGE_LIMIT } from '../../src/stream.js';
+import { frameGeometry } from '../../src/qa-geometry.js';
+import { defaultEndpoint, within } from '../supervisor/stream.js';
 import { fabricated, windowsPacket, diagnosticPacket, line, frame, startFakeHost } from './fake-host.js';
 
 const supervisor = fileURLToPath(new URL('../supervisor/stream.js', import.meta.url));
@@ -316,6 +318,74 @@ test('no host endpoint on a platform without a default is unsupported_host', { s
   child.stdin.write(JSON.stringify(requestFor('windows', null)) + '\n');
   await new Promise(resolve => child.on('close', resolve));
   assert.match(stderr, /^APPLETS_STREAM_ERROR:unsupported_host$/m);
+});
+
+test('the default Windows pipe name starts with two backslashes, a dot and \\pipe\\', { skip: process.platform !== 'win32' && 'the default endpoint exists on Windows only' }, () => {
+  assert.ok(defaultEndpoint().startsWith('\\\\.\\pipe\\relay-win-'));
+});
+
+test('a write deadline never reaches past the end of the request', () => {
+  const now = Date.now();
+  assert.ok(within(now + 300, 10000) <= 300);
+  assert.equal(within(now + 60000, 1000), 1000);
+  assert.equal(within(now - 5, 1000), 1);
+});
+
+// A frame as the real host sends it: window rect and content rect agree, capture time before send time.
+const hostFrame = (sequence, target, over = {}, image) => frame(sequence, target, { initialWindowRectPoints: [10, 20, 200, 100], ...over }, image);
+const snapshots = {
+  window: { target: windowTarget, windowRectPoints: [10, 20, 200, 100], processStartedAt: fabricated.processStartedAt },
+  desktop: { target: desktopTarget, displayConfiguration: windowsPacket.displays[0].displayConfiguration },
+};
+const desktopOverrides = { processStartedAt: undefined, initialWindowRectPoints: undefined, displayConfiguration: windowsPacket.displays[0].displayConfiguration,
+  width: 192, height: 108, contentRectPixels: [0, 0, 192, 108] };
+
+for (const [name, target, over] of [['window', windowTarget, {}], ['desktop', desktopTarget, desktopOverrides]]) {
+  test('frames of a ' + name + ' stream pass the broker geometry check, one ack each, then a diagnostic ends it', async () => {
+    const steps = [() => hostFrame(1, target, over), () => lengthPrefixed({ protocol: 1, type: 'heartbeat', bytes: 0, sentUptimeSeconds: 11 }),
+      () => hostFrame(2, target, over), () => line(diagnosticPacket)];
+    const result = await session({ mode: 'stream', target, script: ({ socket }) => {
+      let next = 0;
+      const send = () => socket.write(steps[next++]());
+      socket.on('acks', () => { if (next < steps.length) send(); });
+      send();
+    } });
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(result.packets.map(p => p.header.type), ['frame', 'heartbeat', 'frame', 'diagnostic']);
+    assert.equal(result.seen.acks, 3);
+    for (const packet of result.packets.filter(p => p.header.type === 'frame')) {
+      assert.ok(frameGeometry({ header: packet.header, receivedMono: performance.now() }, snapshots[name], fabricated.processStartedAt));
+    }
+  });
+}
+
+test('a capture that cannot start ends the stream with one diagnostic and no acknowledgment', async () => {
+  const result = await session({ mode: 'stream', target: windowTarget, script: ({ socket }) => socket.write(line({ ...diagnosticPacket, code: 'capture_unavailable' })) });
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(result.packets.map(p => p.header.type), ['diagnostic']);
+  assert.equal(result.seen.acks, 0);
+});
+
+test('the broker geometry check refuses a frame sent before it was captured or more than 2 s after', async () => {
+  for (const [capture, sent] of [[10, 9.9], [10, 12.5]]) {
+    const result = await session({ mode: 'stream', target: windowTarget, script: ({ socket }) => {
+      socket.write(hostFrame(1, windowTarget, { captureTimeSeconds: capture, sentUptimeSeconds: sent }));
+    } });
+    const packet = result.packets[0];
+    assert.throws(() => frameGeometry({ header: packet.header, receivedMono: performance.now() }, snapshots.window, fabricated.processStartedAt), /frame_geometry_stale/);
+  }
+});
+
+test('a frame whose bytes are not a JPEG or whose sequence goes back never reaches a valid frame', async () => {
+  const notJpeg = await session({ mode: 'stream', target: windowTarget, script: ({ socket }) => socket.write(hostFrame(1, windowTarget, {}, Buffer.from([1, 2, 3, 4]))) });
+  assert.equal(notJpeg.packets.length, 0);
+  assert.ok(notJpeg.decodeError);
+  const back = await session({ mode: 'stream', target: windowTarget, script: ({ socket }) => {
+    socket.write(hostFrame(2, windowTarget));
+    socket.once('acks', () => socket.write(hostFrame(2, windowTarget)));
+  } });
+  assert.deepEqual(back.packets.map(p => p.header.sequence), [2]);
+  assert.ok(back.decodeError);
 });
 
 test('the header limit constant matches the upstream decoder', () => {
