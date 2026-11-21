@@ -42,9 +42,9 @@ static class Capture
     [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")] static extern void Copy(IntPtr to, IntPtr from, UIntPtr size);
 
     static void Check(int hr, string what) { if (hr != 0) throw new Exception(what + " hr=0x" + hr.ToString("X")); }
-    static double Ms(long ticks) { return ticks * 1000.0 / Stopwatch.Frequency; }
+    internal static double Ms(long ticks) { return ticks * 1000.0 / Stopwatch.Frequency; }
 
-    static IDirect3DDevice MakeDevice(out IntPtr d3d, out IntPtr ctx)
+    internal static IDirect3DDevice MakeDevice(out IntPtr d3d, out IntPtr ctx)
     {
         int level;
         Check(D3D11CreateDevice(IntPtr.Zero, 1, IntPtr.Zero, 0x20, IntPtr.Zero, 0, 7, out d3d, out level, out ctx), "D3D11CreateDevice");
@@ -57,7 +57,7 @@ static class Capture
         return (IDirect3DDevice)Marshal.GetObjectForIUnknown(device);
     }
 
-    static GraphicsCaptureItem ItemFor(bool window, IntPtr handle)
+    internal static GraphicsCaptureItem ItemFor(bool window, IntPtr handle)
     {
         Guid interopIid = new Guid("3628E81B-3CAC-4C60-B7F4-23CE0E0C3356"), itemIid = new Guid("79c3f95b-31f7-4ec2-a464-632ef5d30760");
         IntPtr name, factory;
@@ -71,7 +71,7 @@ static class Capture
     }
 
     // Keeps only the newest frame; an older one that was never taken counts as replaced, as on the Mac host.
-    sealed class Grabber : IDisposable
+    internal sealed class Grabber : IDisposable
     {
         readonly Direct3D11CaptureFramePool pool;
         readonly GraphicsCaptureSession session;
@@ -106,15 +106,16 @@ static class Capture
         }
 
         // Next frame that arrived at or after "after"; an older one is dropped.
-        public Direct3D11CaptureFrame Take(long after, out long arrived)
+        // anyPending keeps a frame that arrived before "after" (a stream must not lose the last repaint that landed while it waited for an ack).
+        public Direct3D11CaptureFrame Take(long after, out long arrived, bool anyPending = false)
         {
             long limit = after + FrameWaitMs * Stopwatch.Frequency / 1000;
             while (true)
             {
                 lock (gate)
                 {
-                    if (slot != null && slotTicks >= after) { var frame = slot; slot = null; arrived = slotTicks; return frame; }
-                    if (slot != null) { slot.Dispose(); slot = null; }
+                    if (slot != null && (anyPending || slotTicks >= after)) { var frame = slot; slot = null; arrived = slotTicks; return frame; }
+                    if (slot != null) { slot.Dispose(); slot = null; Replaced++; }
                 }
                 long left = (limit - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency;
                 if (left <= 0) throw new TimeoutException("no frame within " + FrameWaitMs + " ms");
@@ -133,7 +134,7 @@ static class Capture
     }
 
     // BGRA rows are copied one by one: the GPU buffer's stride can be wider than width * 4.
-    static Bitmap ReadBack(IDirect3DSurface surface)
+    internal static Bitmap ReadBack(IDirect3DSurface surface)
     {
         var operation = SoftwareBitmap.CreateCopyFromSurfaceAsync(surface);
         var done = new ManualResetEvent(false);
@@ -161,7 +162,7 @@ static class Capture
         }
     }
 
-    static byte[] Encode(Bitmap bitmap, out int width, out int height)
+    internal static byte[] Encode(Bitmap bitmap, out int width, out int height)
     {
         width = bitmap.Width; height = bitmap.Height;
         Bitmap shown = bitmap;
