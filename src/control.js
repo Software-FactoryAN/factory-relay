@@ -1,8 +1,7 @@
-import { readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import { configSchema } from './schema.js';
-import { quote } from './transport.js';
+import { remoteCommand } from './remote-command.js';
 import { windowTargetSchema, desktopTargetSchema, displayConfigurationSchema, macBundleIdSchema, sampleBundle } from './window-target.js';
 import { mouseSchema } from './mouse.js';
 
@@ -50,17 +49,11 @@ const errors = new Set(['busy', 'stale_lease', 'lease_expired', 'unsafe_state', 
   'stream_closed', 'stream_interrupted', 'host_unavailable', 'accessibility_required',
   'observation_stale', 'target_mismatch', 'element_unavailable', 'action_uncertain',
   'control_timeout', 'control_closed', 'invalid_control_response']);
-const supervisor = (await Promise.all(['remote.py', 'stream-supervisor.py', 'control-supervisor.py'].map(async name => {
-  let source = await readFile(new URL('./' + name, import.meta.url), 'utf8');
-  if (name !== 'control-supervisor.py') source = source.replace(/if __name__ == "__main__":\n    \w+\(\)\s*$/, '');
-  return source;
-}))).join('\n');
-
 export async function control(config, input) {
   config = configSchema.parse(config);
   if (config.transport !== 'factory') throw new Error('factory_transport_required');
   const { operation, target = null, ...args } = controlRequestSchema.parse(input);
-  const child = spawn('droid', ['computer', 'ssh', config.computer, '--', `/usr/bin/python3 -c ${quote(supervisor)}`],
+  const child = spawn('droid', ['computer', 'ssh', config.computer, '--', remoteCommand(config, 'control')],
     { stdio: ['pipe', 'pipe', 'pipe'], detached: true });
   return new Promise((resolve, reject) => {
     let bytes = 0, output = '', failure;

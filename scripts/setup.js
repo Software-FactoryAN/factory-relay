@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { configSchema } from '../src/schema.js';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const usage = 'Usage: npm run setup -- --computer REGISTERED_NAME --workspace /Users/USER/Projects/factory-relay [--owner human:NAME]';
+const usage = 'Usage: npm run setup -- --computer REGISTERED_NAME --workspace /Users/USER/Projects/factory-relay [--owner human:NAME] [--platform mac|windows --supervisor C:\\path\\to\\supervisor.js]';
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 function existing(file) {
@@ -21,13 +21,15 @@ export function setup(args, root = projectRoot) {
   const values = {};
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i];
-    if (!['--computer', '--workspace', '--owner'].includes(key) || values[key] !== undefined || !args[i + 1])
+    if (!['--computer', '--workspace', '--owner', '--platform', '--supervisor'].includes(key) || values[key] !== undefined || !args[i + 1])
       throw new Error(usage);
     values[key] = args[i + 1];
   }
   const parsed = configSchema.safeParse({
     transport: 'factory', computer: values['--computer'], workspace: values['--workspace'],
     owner: values['--owner'] ?? 'human:factory-relay', timeoutSeconds: 300,
+    ...(values['--platform'] === undefined ? {} : { platform: values['--platform'] }),
+    ...(values['--supervisor'] === undefined ? {} : { supervisor: values['--supervisor'] }),
   });
   if (!parsed.success) throw new Error(usage + '\nUse a registered computer name and normalized absolute remote path.');
   root = fs.realpathSync(root);
