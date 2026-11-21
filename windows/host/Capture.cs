@@ -106,14 +106,15 @@ static class Capture
         }
 
         // Next frame that arrived at or after "after"; an older one is dropped.
-        public Direct3D11CaptureFrame Take(long after, out long arrived)
+        // anyPending keeps a frame that arrived before "after" (a stream must not lose the last repaint that landed while it waited for an ack).
+        public Direct3D11CaptureFrame Take(long after, out long arrived, bool anyPending = false)
         {
             long limit = after + FrameWaitMs * Stopwatch.Frequency / 1000;
             while (true)
             {
                 lock (gate)
                 {
-                    if (slot != null && slotTicks >= after) { var frame = slot; slot = null; arrived = slotTicks; return frame; }
+                    if (slot != null && (anyPending || slotTicks >= after)) { var frame = slot; slot = null; arrived = slotTicks; return frame; }
                     if (slot != null) { slot.Dispose(); slot = null; Replaced++; }
                 }
                 long left = (limit - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency;

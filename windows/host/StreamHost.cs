@@ -119,7 +119,7 @@ static class StreamHost
                 if (!Same(first, Resolve(args))) return 0;
                 long start = Stopwatch.GetTimestamp(), arrived;
                 Direct3D11CaptureFrame frame;
-                try { frame = grabber.Take(start, out arrived); }
+                try { frame = grabber.Take(start, out arrived, true); }
                 catch (TimeoutException)
                 {
                     if (sequence == 0 && ++silent >= HeartbeatCount) throw new Exception("no frame from the target");
@@ -144,6 +144,7 @@ static class StreamHost
                 double sent = Now(), age = sent - capture;
                 if (double.IsNaN(age) || age < 0) throw new Exception("frame stamped after it was sent: " + age);
                 if (age > MaxAgeSeconds) { dropped++; continue; }
+                if (!Same(first, Resolve(args))) return 0;
                 int replaced = grabber.Replaced + dropped;
                 Send(stdout, Header(first, ++sequence, width, height, capture, sent, replaced, jpeg.Length), jpeg);
                 if (timing != null)
