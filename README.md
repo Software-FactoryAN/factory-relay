@@ -8,6 +8,8 @@ remain available. All selected-display content is private local evidence; review
 it before sharing.
 **iOS input and keyboard/type input are not supported by this slice.**
 
+Pull requests into `main` follow the [GitHub merge queue instructions](docs/merge-queue.md).
+
 ## Requirements
 
 ### Local computer
@@ -48,7 +50,7 @@ mkdir -p "$HOME/Projects/factory-relay"
 To have Droid guide setup, paste this into a local Factory session:
 
 ```text
-Set up https://github.com/Cynnamoroll/factory-relay using its README and
+Set up https://github.com/Software-FactoryAN/factory-relay using its README and
 factory-relay-setup skill. Reuse an existing checkout or clone a new one.
 Confirm my registered Mac and workspace, check prerequisites, and preserve
 existing configuration and approved hosts. Ask before system changes or license
@@ -59,7 +61,7 @@ Use factory-relay to record one RelayMac check and give me its recording.
 Or run locally, replacing `YOUR_REGISTERED_MAC` and the Mac username `you`:
 
 ```sh
-git clone https://github.com/Cynnamoroll/factory-relay.git
+git clone https://github.com/Software-FactoryAN/factory-relay.git
 cd factory-relay
 npm ci
 npm run setup -- --computer YOUR_REGISTERED_MAC --workspace /Users/you/Projects/factory-relay
