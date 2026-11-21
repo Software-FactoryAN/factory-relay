@@ -288,7 +288,7 @@ export class Broker {
       if (this.current()) throw new Error('run_active');
       if (this.owner) throw new Error('release_control_before_connect');
       requireNativeAuthorization(this.applications);
-      if (!this.lease) await this.rotate(false);
+      if (!this.lease) await this.rotate(false, null);
       await this.halt();
       try {
         await this.refreshTargets(this.lease);

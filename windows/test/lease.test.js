@@ -267,10 +267,17 @@ test('L-18 lock contention times out busy, waits for a release, reclaims stale l
   setTimeout(() => rmSync(lock), 40);
   assert.ok(await acq(dir, 'a', W1, {}, { ...o, lockTimeoutMs: 2000 }));
   assert.equal(existsSync(lock), false, 'the lock is released after the operation');
-  writeFileSync(lock, JSON.stringify({ pid: process.pid, nonce: 'old' }));
   const old = new Date(Date.now() - 60000);
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, nonce: 'paused-owner' }));
+  utimesSync(lock, old, old);
+  await fails(acq(dir, 'a', W2), 'busy');
+  assert.equal(JSON.parse(readFileSync(lock, 'utf8')).nonce, 'paused-owner', 'a live owner keeps its lock however old');
+  writeFileSync(lock, '{');
   utimesSync(lock, old, old);
   assert.ok(await acq(dir, 'a', W2));
+  writeFileSync(lock, '{');
+  await fails(acq(dir, 'a', { ...W2, windowId: 5 }), 'busy');
+  rmSync(lock);
   const dead = spawn(process.execPath, ['-e', '']);
   await new Promise(resolve => dead.on('close', resolve));
   writeFileSync(lock, JSON.stringify({ pid: dead.pid, nonce: 'dead' }));

@@ -150,17 +150,22 @@ export function authorize(root, request, nowSeconds = Date.now() / 1000) {
   return request.target === undefined ? verifyAny(state, request, nowSeconds) : verify(state, request, nowSeconds);
 }
 
+/** A lock whose owner is alive is never taken over, however old; age only decides for a lock file with no readable owner. */
 function reclaimable(file, options) {
   const info = lstat(file);
-  if (!info?.isFile()) throw new Failure('unsafe_state');
-  let dead = false;
-  try { process.kill(JSON.parse(readFileSync(file, 'utf8')).pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
+  if (!info) return true;
+  if (!info.isFile()) throw new Failure('unsafe_state');
+  let verdict = false;
+  try {
+    const { pid } = JSON.parse(readFileSync(file, 'utf8'));
+    if (!integer(pid, 1, 2 ** 31 - 1)) throw new Error();
+    try { process.kill(pid, 0); } catch (error) { verdict = error.code === 'ESRCH'; }
+  } catch { verdict = Date.now() - info.mtimeMs > options.staleLockMs; }
   const again = lstat(file);
-  if ((dead || Date.now() - info.mtimeMs > options.staleLockMs) && again?.ino === info.ino && again.mtimeMs === info.mtimeMs) {
+  if (verdict && again?.ino === info.ino && again.mtimeMs === info.mtimeMs) {
     try { unlinkSync(file); } catch {}
-    return true;
   }
-  return false;
+  return verdict || !again;
 }
 
 async function withLock(root, options, task) {

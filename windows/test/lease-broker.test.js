@@ -6,6 +6,7 @@ import path from 'node:path';
 import { Broker, nativeAdapter } from '../../src/qa-broker.js';
 import { RunStore } from '../../src/qa-store.js';
 import { parseOperation } from '../../src/schema.js';
+import { run } from '../../src/transport.js';
 import { sampleBundle } from '../../src/window-target.js';
 import { acquire, release, readState } from '../supervisor/lease.js';
 
@@ -121,6 +122,35 @@ test('B-02 Windows brokers hold per-window leases in parallel and the discovery 
   await one.broker.close();
   await two.broker.close();
   assert.deepEqual(liveOwners(root), [], 'close releases the target leases');
+});
+
+test('B-04 connect leases the discovery key even while the previous window is still selected', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lease-state-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const first = windowsBroker(t, root, 'qa:one'), second = windowsBroker(t, root, 'qa:two');
+  await first.broker.execute('human', { op: 'connect' });
+  await first.broker.execute('human', { op: 'select', target: W1 });
+  const { lease, leaseTarget } = first.broker;
+  first.broker.lease = null;
+  first.broker.leaseTarget = null;
+  await first.broker.native.release(lease, leaseTarget);
+  await second.broker.execute('human', { op: 'connect' });
+  await second.broker.execute('human', { op: 'select', target: W1 });
+  await first.broker.execute('human', { op: 'connect' });
+  assert.deepEqual(first.calls.at(-1), ['acquire', null]);
+  assert.deepEqual(liveOwners(root), ['discovery=qa:one', 'w:1=qa:two']);
+});
+
+test('transport refuses a target for a non-windows platform before any remote call', { skip: process.platform === 'win32' }, async t => {
+  const requests = stubDroid(t);
+  const proof = { token: 'b'.repeat(64), generation: 4 };
+  const mine = { transport: 'factory', computer: 'c', workspace: '/w', owner: 'x', timeoutSeconds: 5 };
+  for (const config of [mine, { ...mine, platform: 'mac' }]) {
+    await assert.rejects(async () => run(config, 'acquire', { ttlSeconds: 5, takeover: true, target: W1 }), /invalid_arguments/);
+    await assert.rejects(async () => run(config, 'release', { lease: proof, target: W1 }), /invalid_arguments/);
+  }
+  await run({ ...mine, platform: 'windows', supervisor: 'C:/relay/s.js' }, 'acquire', { ttlSeconds: 5, target: W1 });
+  assert.equal(requests().length, 1, 'only the windows request reached the remote');
 });
 
 test('B-03 a takeover for another target frees the old lease instead of leaking it', async t => {
