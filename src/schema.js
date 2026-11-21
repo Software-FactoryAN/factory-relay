@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import path from 'node:path';
 import { applicationsSchema } from './qa-applications.js';
+import { targetSchema as leaseTarget } from './window-target.js';
 
 const text = z.string().min(1).max(256).regex(/^[^\x00-\x1f\x7f]+$/);
 const absolute = text.refine(s => s.startsWith('/') && path.posix.normalize(s) === s && s !== '/', 'Use a normalized absolute path');
@@ -24,8 +25,8 @@ const visual = { lease: proof, target, udid: uuid,
 export const operations = {
   preflight: z.object({}).strict(),
   simulators: z.object({}).strict(),
-  acquire: z.object({ ttlSeconds: z.number().int().min(1).max(3600), takeover: z.boolean().default(false) }).strict(),
-  release: z.object({ lease: proof }).strict(),
+  acquire: z.object({ ttlSeconds: z.number().int().min(1).max(3600), takeover: z.boolean().default(false), target: leaseTarget.optional() }).strict(),
+  release: z.object({ lease: proof, target: leaseTarget.optional() }).strict(),
   boot: z.object({ lease: proof, udid: uuid }).strict(),
   install: z.object({ lease: proof, udid: uuid, app: relative.refine(s => s.endsWith('.app')) }).strict(),
   launch: z.object({ lease: proof, udid: uuid, bundleId: z.string().min(3).max(255).regex(/^[A-Za-z0-9][A-Za-z0-9.-]*$/) }).strict(),
