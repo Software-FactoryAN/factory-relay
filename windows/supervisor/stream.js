@@ -129,6 +129,9 @@ class Reader {
   }
 }
 
+// A write may not outlive the request: the step limit is cut to the time left before the request's own end.
+export const within = (end, limitMs) => Math.max(1, Math.min(end - Date.now(), limitMs));
+
 function write(sink, data, timeoutMs) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Failure('stream_timeout')), timeoutMs);
@@ -137,7 +140,7 @@ function write(sink, data, timeoutMs) {
 }
 
 export function defaultEndpoint() {
-  return process.platform === 'win32' ? '\\.\\pipe\\relay-win-' + os.userInfo().username : null;
+  return process.platform === 'win32' ? '\\\\.\\pipe\\relay-win-' + os.userInfo().username : null;
 }
 
 function connect(endpoint, deadline) {
@@ -207,16 +210,16 @@ export async function runStream({ stdin = process.stdin, stdout = process.stdout
   try {
     checkHello(await host.line(1024, Math.min(end, Date.now() + STEP_TIMEOUT_MS)));
     authorize(root, request);
-    await write(socket, JSON.stringify(argumentsFor(request)) + '\n', STEP_TIMEOUT_MS);
+    await write(socket, JSON.stringify(argumentsFor(request)) + '\n', within(end, STEP_TIMEOUT_MS));
     while (true) {
       const { header, packet } = await readPacket(host, Math.min(end, Date.now() + STEP_TIMEOUT_MS), request.mode);
       authorize(root, request);
-      await write(stdout, packet, STEP_TIMEOUT_MS);
+      await write(stdout, packet, within(end, STEP_TIMEOUT_MS));
       if (!['frame', 'heartbeat'].includes(header.type)) return;
       const ack = await input.take(1, Math.min(end, Date.now() + STEP_TIMEOUT_MS));
       if (ack[0] !== ACK) throw new Failure('invalid_stream');
       authorize(root, request);
-      await write(socket, ack, ACK_WRITE_TIMEOUT_MS);
+      await write(socket, ack, within(end, ACK_WRITE_TIMEOUT_MS));
     }
   } finally {
     stdin.removeListener('close', closeHost);
