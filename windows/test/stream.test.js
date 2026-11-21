@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,9 +26,10 @@ function requestFor(mode, target, over = {}) {
 }
 
 // Runs the supervisor as ssh would: request line on stdin, packets decoded by the upstream decoder, one ack byte per frame.
-async function session({ mode = 'windows', target = null, state = validState, request, script = () => {}, hello, ack = 6, serve = true, closeAfterPackets }) {
+async function session({ mode = 'windows', target = null, state = validState, request, script = () => {}, hello, ack = 6, serve = true, closeAfterPackets, endStdin = false, onPacket, prepare }) {
   const dir = mkdtempSync(path.join(tmpdir(), 'rs-'));
   const endpoint = endpointIn(dir);
+  prepare?.(dir);
   if (state !== null) writeFileSync(path.join(dir, 'state.json'), typeof state === 'string' ? state : JSON.stringify(state), { mode: 0o600 });
   const host = serve ? await startFakeHost(endpoint, script, hello && { hello }) : { seen: { requests: [], acks: 0 }, close: async () => {} };
   const child = spawn(process.execPath, [supervisor, 'stream'], { env: { ...process.env, RELAY_STATE_DIR: dir, RELAY_HOST_ENDPOINT: endpoint }, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -37,12 +38,14 @@ async function session({ mode = 'windows', target = null, state = validState, re
   child.stdin.on('error', () => {});
   const exited = new Promise(resolve => child.on('close', code => resolve(code)));
   child.stdin.write(typeof request === 'string' ? request : JSON.stringify(request ?? requestFor(mode, target)) + '\n');
+  if (endStdin) child.stdin.end();
   const packets = [];
   let decodeError;
   try {
     for await (const packet of decodeStream(child.stdout)) {
       packets.push(packet);
-      if (['frame', 'heartbeat'].includes(packet.header.type)) child.stdin.write(Buffer.from([ack]));
+      if (ack !== null && ['frame', 'heartbeat'].includes(packet.header.type)) child.stdin.write(Buffer.from([ack]));
+      onPacket?.(child);
       if (packets.length === closeAfterPackets) child.stdin.end();
     }
   } catch (error) { decodeError = error; }
@@ -122,6 +125,7 @@ const invalidRequests = {
   'window id zero': () => requestFor('stream', { ...windowTarget, windowId: 0 }),
   'display uuid in capitals': () => requestFor('stream', { ...desktopTarget, displayUUID: desktopTarget.displayUUID.toUpperCase() }),
   'lease token too short': () => requestFor('windows', null, { args: { lease: { token: 'ab', generation: 3 } } }),
+  'fractional timeout': () => requestFor('windows', null, { timeout: 1.5 }),
   'not json': () => '{nope\n',
   'line over the limit': () => '{' + ' '.repeat(16400) + '\n',
 };
@@ -235,6 +239,84 @@ for (const revokedAt of ['after the decoder got frame 1', 'when the host receive
     assert.equal(host.seen.acks, revokedAt.startsWith('after') ? 0 : 1);
   });
 }
+
+const canSymlink = (() => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'rs-'));
+  try { symlinkSync('x', path.join(dir, 'y')); return true; } catch { return false; } finally { rmSync(dir, { recursive: true, force: true }); }
+})();
+
+test('a request cut off before its newline is stream_closed', async () => {
+  const result = await session({ request: '{"owner"', endStdin: true });
+  assert.equal(result.errorCode, 'stream_closed');
+  assert.equal(result.seen.requests.length, 0);
+});
+
+test('a role other than stream is invalid_request', async () => {
+  const child = spawn(process.execPath, [supervisor, 'input']);
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const code = await new Promise(resolve => child.on('close', resolve));
+  assert.equal(code, 1);
+  assert.match(stderr, /^APPLETS_STREAM_ERROR:invalid_request$/m);
+});
+
+for (const [mode, packet] of [['windows', windowsPacket], ['diagnose', diagnosticPacket]]) {
+  test(mode + ': stdin closed right after the request does not cut the host answer', async () => {
+    const result = await session({ mode, endStdin: true, script: ({ socket }) => setTimeout(() => socket.write(line(packet)), 100) });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.packets.length, 1);
+  });
+}
+
+test('frame, heartbeat and diagnostic in one stream: two acks, exit 0', async () => {
+  const steps = [() => frame(1, windowTarget), () => lengthPrefixed({ protocol: 1, type: 'heartbeat', bytes: 0, sentUptimeSeconds: 11 }), () => line(diagnosticPacket)];
+  const result = await session({ mode: 'stream', target: windowTarget, script: ({ socket }) => {
+    let next = 0;
+    const send = () => socket.write(steps[next++]());
+    socket.on('acks', () => { if (next < steps.length) send(); });
+    send();
+  } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(result.packets.map(p => p.header.type), ['frame', 'heartbeat', 'diagnostic']);
+  assert.equal(result.seen.acks, 2);
+});
+
+test('a silent host ends at the request timeout with stream_timeout', async () => {
+  const result = await session({ request: requestFor('windows', null, { timeout: 1 }) });
+  assert.equal(result.errorCode, 'stream_timeout');
+  assert.equal(result.code, 1);
+});
+
+test('a frame that is never acknowledged ends at the request timeout with stream_timeout', async () => {
+  const result = await session({ mode: 'stream', target: windowTarget, ack: null, request: requestFor('stream', windowTarget, { timeout: 1 }),
+    script: ({ socket }) => socket.write(frame(1, windowTarget)) });
+  assert.equal(result.errorCode, 'stream_timeout');
+  assert.equal(result.packets.length, 1);
+});
+
+test('SIGTERM mid-stream gives stream_interrupted', { skip: process.platform === 'win32' && 'a Windows process cannot handle SIGTERM' }, async () => {
+  const result = await session({ mode: 'stream', target: windowTarget, ack: null, onPacket: child => child.kill('SIGTERM'),
+    script: ({ socket }) => socket.write(frame(1, windowTarget)) });
+  assert.equal(result.errorCode, 'stream_interrupted');
+  assert.equal(result.code, 1);
+});
+
+test('a state.json that is a symlink is unsafe_state', { skip: !canSymlink && 'symlinks need a privilege here' }, async () => {
+  const result = await session({ state: null, script: () => assert.fail('host contacted'), prepare: dir => {
+    writeFileSync(path.join(dir, 'real.json'), JSON.stringify(validState), { mode: 0o600 });
+    symlinkSync('real.json', path.join(dir, 'state.json'));
+  } });
+  assert.equal(result.errorCode, 'unsafe_state');
+});
+
+test('no host endpoint on a platform without a default is unsupported_host', { skip: process.platform === 'win32' && 'Windows has a default pipe' }, async () => {
+  const child = spawn(process.execPath, [supervisor, 'stream'], { env: { ...process.env, RELAY_HOST_ENDPOINT: '' } });
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  child.stdin.write(JSON.stringify(requestFor('windows', null)) + '\n');
+  await new Promise(resolve => child.on('close', resolve));
+  assert.match(stderr, /^APPLETS_STREAM_ERROR:unsupported_host$/m);
+});
 
 test('the header limit constant matches the upstream decoder', () => {
   assert.equal(HEADER_LIMIT, 8192);
