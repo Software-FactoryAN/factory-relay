@@ -199,7 +199,8 @@ static class Capture
             using (Direct3D11CaptureFrame frame = grabber.Take(start, out arrived))
             {
                 result.CaptureMs = Ms(arrived - start);
-                // Arrival time on the QPC clock minus SystemRelativeTime: near zero and never negative if both share one clock base.
+                // QPC arrival minus SystemRelativeTime. Measured about -15 ms on a cold session's first frame, so the frame time can lie ahead of
+                // the QPC read; a packet's send time must be stamped after this and the pair checked before it is sent.
                 result.FrameAgeMs = Ms(arrived) - frame.SystemRelativeTime.TotalMilliseconds;
                 result.Replaced = grabber.Replaced;
                 long read = Stopwatch.GetTimestamp();
