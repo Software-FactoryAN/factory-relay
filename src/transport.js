@@ -3,11 +3,9 @@ import { readFile } from 'node:fs/promises';
 import { configSchema, parseOperation } from './schema.js';
 import { saveFrame } from './frames.js';
 
-const helper = (await readFile(new URL('./remote.py', import.meta.url), 'utf8')).replace(
-  'if __name__ == "__main__":',
-  (await readFile(new URL('./bridge.py', import.meta.url), 'utf8')) + '\n' +
-  (await readFile(new URL('./visual.py', import.meta.url), 'utf8')) + '\nif __name__ == "__main__":');
-export const quote = s => "'" + s.replaceAll("'", "'\\''") + "'";
+import { quote, remoteCommand } from './remote-command.js';
+
+export { quote };
 export const MAX_OUTPUT = 1024 * 1024;
 
 export async function loadConfig(file) {
@@ -23,7 +21,7 @@ export async function loadConfig(file) {
 export function run(config, name, input) {
   const args = parseOperation(name, input);
   const request = JSON.stringify({ operation: name, args, owner: config.owner, workspace: config.workspace, timeout: config.timeoutSeconds });
-  const command = `/usr/bin/python3 -c ${quote(helper)}`;
+  const command = remoteCommand(config, 'helper');
   const transportArgs = config.transport === 'factory'
     ? ['computer', 'ssh', config.computer, '--', command] : [
     '-F', '/dev/null', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',

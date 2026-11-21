@@ -36,6 +36,7 @@ export const operations = {
   tap: z.object({ ...visual, observationId, elementId: text.max(128) }).strict(),
   frame: z.object({ lease: proof, observationId }).strict(),
 };
+const windowsSupervisor = z.string().max(260).regex(/^[A-Za-z]:[\\/][A-Za-z0-9_. ()\\/:-]+$/);
 const commonConfig = {
   workspace: absolute,
   owner: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_.:@/-]*$/),
@@ -48,7 +49,10 @@ export const configSchema = z.preprocess(value => value && typeof value === 'obj
   z.object({
     ...commonConfig, transport: z.literal('factory'),
     computer: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/),
-  }).strict(),
+    platform: z.enum(['mac', 'windows']).optional(),
+    supervisor: windowsSupervisor.optional(),
+  }).strict().refine(c => (c.platform === 'windows') === (c.supervisor !== undefined),
+    'A supervisor path is required for windows and not allowed otherwise'),
   z.object({
     ...commonConfig, transport: z.literal('ssh'),
     host: z.string().max(253).regex(/^[A-Za-z0-9][A-Za-z0-9.-]*$/),

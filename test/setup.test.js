@@ -93,3 +93,19 @@ test('setup validates arguments and JSON and refuses symlink destinations', t =>
   assert.equal(run(root).status, 1);
   assert.equal(json(path.join(root, 'package.json')).name, 'factory-relay');
 });
+
+test('setup writes platform and supervisor only when given and refuses an inconsistent pair', t => {
+  const root = checkout(t), config = path.join(root, 'config.local.json');
+  const windowsArgs = [...args, '--platform', 'windows', '--supervisor', 'C:\\relay\\supervisor.js'];
+  for (const invalid of [[...args, '--platform', 'windows'], [...args, '--supervisor', 'C:\\relay\\supervisor.js'],
+    [...args, '--platform', 'linux'], [...windowsArgs, '--platform', 'mac'], [...args, '--platform', 'mac', '--supervisor', 'C:\\x.js']]) {
+    assert.equal(run(root, invalid).status, 1, JSON.stringify(invalid));
+    assert.equal(fs.existsSync(config), false);
+  }
+  assert.equal(run(root, windowsArgs).status, 0);
+  assert.deepEqual(configSchema.parse(json(config)), {
+    transport: 'factory', computer: 'test-mac', workspace: "/Users/test/Projects/QA's sample",
+    owner: 'human:factory-relay', timeoutSeconds: 300, platform: 'windows', supervisor: 'C:\\relay\\supervisor.js',
+  });
+  assert.equal(run(root).status, 1, 'a Mac setup must not overwrite a Windows config');
+});

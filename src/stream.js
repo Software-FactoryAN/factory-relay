@@ -1,8 +1,7 @@
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { configSchema } from './schema.js';
-import { quote } from './transport.js';
+import { remoteCommand } from './remote-command.js';
 import { windowTargetSchema, desktopTargetSchema, targetSchema, displayConfigurationSchema, sameTarget } from './window-target.js';
 
 export const HEADER_LIMIT = 8192;
@@ -87,9 +86,6 @@ export async function* decodeStream(readable) {
 }
 
 const proofSchema = z.strictObject({ token: z.string().regex(/^[a-f0-9]{64}$/), generation: integer });
-const supervisor = (await readFile(new URL('./remote.py', import.meta.url), 'utf8'))
-  .replace('if __name__ == "__main__":\n    main()', '') + '\n' +
-  await readFile(new URL('./stream-supervisor.py', import.meta.url), 'utf8');
 
 /** Transport seam for a future native sidebar; no UI or input API is implied. */
 export async function consumeHost(config, { lease, mode = 'stream', target = null, signal }, consume) {
@@ -99,7 +95,7 @@ export async function consumeHost(config, { lease, mode = 'stream', target = nul
   mode = z.enum(['diagnose', 'windows', 'stream']).parse(mode);
   target = mode === 'stream' ? streamTargetSchema.parse(target) : z.null().parse(target);
   if (signal?.aborted) throw new Error('stream_cancelled');
-  const child = spawn('droid', ['computer', 'ssh', config.computer, '--', `/usr/bin/python3 -c ${quote(supervisor)}`],
+  const child = spawn('droid', ['computer', 'ssh', config.computer, '--', remoteCommand(config, 'stream')],
     { stdio: ['pipe', 'pipe', 'pipe'], detached: true });
   let stderrBytes = 0, stderr = '', failure, frames = 0, packets = 0, terminal = false;
   const stop = () => {
