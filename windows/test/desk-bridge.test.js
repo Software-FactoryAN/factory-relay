@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { decodeStream } from '../../src/stream.js';
 import { frameGeometry } from '../../src/qa-geometry.js';
 import { startFakeHost } from './fake-host.js';
+import { targetKey } from '../supervisor/lease.js';
 
 // Desk PC only: the real Windows.exe runs behind a pipe bridge, through windows/supervisor/stream.js, into the upstream decoder.
 //   RELAY_DESK_HOST=<Windows.exe>  RELAY_DESK_WINDOW=<process name of an own test window that repaints>  [RELAY_DESK_STATIC=<process name of an own window that never repaints>]
@@ -27,7 +28,6 @@ const rowFor = name => {
 async function run(row, stop) {
   const dir = mkdtempSync(path.join(tmpdir(), 'rs-desk-'));
   const endpoint = '\\\\.\\pipe\\relay-desk-' + path.basename(dir);
-  writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ generation: 1, lease: { owner, token, expiresAt: Date.now() / 1000 + 600 } }), { mode: 0o600 });
   let hostExit;
   const fake = await startFakeHost(endpoint, ({ args, socket, seen }) => {
     const host = spawn(exe, args, { stdio: ['pipe', 'pipe', 'inherit'] });
@@ -39,6 +39,7 @@ async function run(row, stop) {
     socket.on('acks', () => { host.stdin.write(Buffer.alloc(seen.acks - acked, 6)); acked = seen.acks; });
   });
   const target = { windowId: row.windowId, pid: row.pid, bundleId: row.bundleId };
+  writeFileSync(path.join(dir, 'leases.json'), JSON.stringify({ desktopGeneration: 0, leases: { [targetKey(target)]: { generation: 1, lease: { owner, token, expiresAt: Date.now() / 1000 + 600 } } } }), { mode: 0o600 });
   const child = spawn(process.execPath, [supervisor, 'stream'], { env: { ...process.env, RELAY_STATE_DIR: dir, RELAY_HOST_ENDPOINT: endpoint }, stdio: ['pipe', 'pipe', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', chunk => { stderr += chunk; });

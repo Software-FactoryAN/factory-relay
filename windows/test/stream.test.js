@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { decodeStream, HEADER_LIMIT, IMAGE_LIMIT } from '../../src/stream.js';
 import { frameGeometry } from '../../src/qa-geometry.js';
 import { defaultEndpoint, within } from '../supervisor/stream.js';
+import { targetKey } from '../supervisor/lease.js';
 import { fabricated, windowsPacket, diagnosticPacket, line, frame, startFakeHost } from './fake-host.js';
 
 const supervisor = fileURLToPath(new URL('../supervisor/stream.js', import.meta.url));
@@ -15,7 +16,12 @@ const token = 'a'.repeat(64);
 const owner = 'owner-1';
 const windowTarget = { windowId: 4242, pid: 100, bundleId: fabricated.bundleId };
 const desktopTarget = { kind: 'desktop', displayId: 7, displayUUID: fabricated.displayUUID };
-const validState = { generation: 3, lease: { owner, token, expiresAt: Date.now() / 1000 + 600 } };
+const goodLease = { owner, token, expiresAt: Date.now() / 1000 + 600 };
+const heldKeys = ['discovery', targetKey(windowTarget), targetKey(desktopTarget)];
+// One lease per kind of target at generation 3, so every mode finds the lease it needs; change(lease, generation) rewrites them all.
+const leaseState = (change = lease => lease, generation = 3) =>
+  ({ desktopGeneration: Math.max(3, generation), leases: Object.fromEntries(heldKeys.map(key => [key, { generation, lease: change(goodLease) }])) });
+const validState = leaseState();
 const endpointIn = dir => process.platform === 'win32' ? '\\\\.\\pipe\\relay-test-' + path.basename(dir) : path.join(dir, 'h.sock');
 const lengthPrefixed = (header, image = Buffer.alloc(0)) => {
   const json = Buffer.from(JSON.stringify(header)), size = Buffer.alloc(4);
@@ -32,7 +38,7 @@ async function session({ mode = 'windows', target = null, state = validState, re
   const dir = mkdtempSync(path.join(tmpdir(), 'rs-'));
   const endpoint = endpointIn(dir);
   prepare?.(dir);
-  if (state !== null) writeFileSync(path.join(dir, 'state.json'), typeof state === 'string' ? state : JSON.stringify(state), { mode: 0o600 });
+  if (state !== null) writeFileSync(path.join(dir, 'leases.json'), typeof state === 'string' ? state : JSON.stringify(state), { mode: 0o600 });
   const host = serve ? await startFakeHost(endpoint, script, hello && { hello }) : { seen: { requests: [], acks: 0 }, close: async () => {} };
   const child = spawn(process.execPath, [supervisor, 'stream'], { env: { ...process.env, RELAY_STATE_DIR: dir, RELAY_HOST_ENDPOINT: endpoint }, stdio: ['pipe', 'pipe', 'pipe'] });
   let stderr = '';
@@ -142,15 +148,15 @@ for (const [name, build] of Object.entries(invalidRequests)) {
 
 const refusals = {
   'no state file': [null, 'stale_lease'],
-  'no lease': [{ generation: 3, lease: null }, 'stale_lease'],
-  'other generation': [{ ...validState, generation: 4 }, 'stale_lease'],
-  'other owner': [{ generation: 3, lease: { ...validState.lease, owner: 'someone' } }, 'stale_lease'],
-  'other token': [{ generation: 3, lease: { ...validState.lease, token: 'b'.repeat(64) } }, 'stale_lease'],
-  'expired lease': [{ generation: 3, lease: { ...validState.lease, expiresAt: 1 } }, 'lease_expired'],
+  'no lease': [leaseState(() => null), 'stale_lease'],
+  'other generation': [leaseState(lease => lease, 4), 'stale_lease'],
+  'other owner': [leaseState(lease => ({ ...lease, owner: 'someone' })), 'stale_lease'],
+  'other token': [leaseState(lease => ({ ...lease, token: 'b'.repeat(64) })), 'stale_lease'],
+  'expired lease': [leaseState(lease => ({ ...lease, expiresAt: 1 })), 'lease_expired'],
   'state is not json': ['{', 'unsafe_state'],
   'state has an extra key': [{ ...validState, extra: 1 }, 'unsafe_state'],
   'lease expiry is not a number': [{ generation: 3, lease: { ...validState.lease, expiresAt: 'soon' } }, 'unsafe_state'],
-  'state over the size limit': [JSON.stringify({ ...validState, pad: 'x'.repeat(17000) }), 'unsafe_state'],
+  'state over the size limit': [JSON.stringify({ ...validState, pad: 'x'.repeat(70000) }), 'unsafe_state'],
 };
 for (const [name, [state, expected]] of Object.entries(refusals)) {
   test('lease refused without contacting the host: ' + name, async () => {
@@ -164,7 +170,7 @@ for (const [name, [state, expected]] of Object.entries(refusals)) {
 test('an inflight marker makes the supervisor busy', async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'rs-'));
   mkdirSync(dir, { recursive: true });
-  writeFileSync(path.join(dir, 'state.json'), JSON.stringify(validState), { mode: 0o600 });
+  writeFileSync(path.join(dir, 'leases.json'), JSON.stringify(validState), { mode: 0o600 });
   writeFileSync(path.join(dir, 'inflight'), '');
   const child = spawn(process.execPath, [supervisor, 'stream'], { env: { ...process.env, RELAY_STATE_DIR: dir, RELAY_HOST_ENDPOINT: path.join(dir, 'none') } });
   let stderr = '';
@@ -173,6 +179,27 @@ test('an inflight marker makes the supervisor busy', async () => {
   await new Promise(resolve => child.on('close', resolve));
   rmSync(dir, { recursive: true, force: true });
   assert.match(stderr, /^APPLETS_STREAM_ERROR:busy$/m);
+});
+
+// A lease is per target: holding the discovery lease or another window's lease proves the owner for windows and diagnose only.
+const otherWindow = { ...windowTarget, windowId: 4243 };
+for (const [name, target, held] of [
+  ['a lease on another window', windowTarget, ['discovery', targetKey(otherWindow)]],
+  ['only the discovery lease', windowTarget, ['discovery']],
+  ['a lease on another window than the desktop', desktopTarget, [targetKey(windowTarget)]],
+]) {
+  test('stream refused without contacting the host: ' + name, async () => {
+    const state = { desktopGeneration: 3, leases: Object.fromEntries(held.map(key => [key, { generation: 3, lease: goodLease }])) };
+    const result = await session({ mode: 'stream', target, state, script: () => assert.fail('host contacted') });
+    assert.equal(result.errorCode, 'stale_lease');
+    assert.equal(result.seen.requests.length, 0);
+  });
+}
+
+test('windows mode accepts a lease held on any one window', async () => {
+  const state = { desktopGeneration: 3, leases: { [targetKey(otherWindow)]: { generation: 3, lease: goodLease } } };
+  const result = await session({ state, script: ({ socket }) => socket.write(line(windowsPacket)) });
+  assert.equal(result.code, 0, result.stderr);
 });
 
 test('no host listening: host_unavailable', async () => {
@@ -218,8 +245,8 @@ for (const revokedAt of ['after the decoder got frame 1', 'when the host receive
   test('lease revoked ' + revokedAt + ': the next packet is not forwarded', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'rs-'));
     const endpoint = endpointIn(dir);
-    const revoke = () => writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ ...validState, generation: 4 }), { mode: 0o600 });
-    writeFileSync(path.join(dir, 'state.json'), JSON.stringify(validState), { mode: 0o600 });
+    const revoke = () => writeFileSync(path.join(dir, 'leases.json'), JSON.stringify(leaseState(lease => lease, 4)), { mode: 0o600 });
+    writeFileSync(path.join(dir, 'leases.json'), JSON.stringify(validState), { mode: 0o600 });
     const host = await startFakeHost(endpoint, ({ socket }) => {
       socket.write(frame(1, windowTarget));
       socket.once('acks', () => { if (revokedAt.startsWith('when')) revoke(); socket.write(frame(2, windowTarget)); });
@@ -303,10 +330,10 @@ test('SIGTERM mid-stream gives stream_interrupted', { skip: process.platform ===
   assert.equal(result.code, 1);
 });
 
-test('a state.json that is a symlink is unsafe_state', { skip: !canSymlink && 'symlinks need a privilege here' }, async () => {
+test('a leases.json that is a symlink is unsafe_state', { skip: !canSymlink && 'symlinks need a privilege here' }, async () => {
   const result = await session({ state: null, script: () => assert.fail('host contacted'), prepare: dir => {
     writeFileSync(path.join(dir, 'real.json'), JSON.stringify(validState), { mode: 0o600 });
-    symlinkSync('real.json', path.join(dir, 'state.json'));
+    symlinkSync('real.json', path.join(dir, 'leases.json'));
   } });
   assert.equal(result.errorCode, 'unsafe_state');
 });

@@ -1,14 +1,13 @@
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { lstatSync, readFileSync, existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { timingSafeEqual } from 'node:crypto';
+import { Failure, validTarget, authorize as authorizeLease } from './lease.js';
+import { runHelper } from './helper.js';
 
 export const STREAM_HEADER_LIMIT = 8192;
 export const STREAM_IMAGE_LIMIT = 4 * 1024 * 1024;
 const REQUEST_LIMIT_BYTES = 16384;
-const STATE_LIMIT_BYTES = 16385;
 const BUFFER_PAUSE_BYTES = STREAM_IMAGE_LIMIT * 2;
 const STEP_TIMEOUT_MS = 10000;
 const ACK_WRITE_TIMEOUT_MS = 1000;
@@ -17,25 +16,12 @@ const MODES = ['diagnose', 'windows', 'stream'];
 const ERRORS = new Set(['busy', 'stale_lease', 'lease_expired', 'unsafe_state', 'unsafe_peer',
   'unsupported_host', 'ipc_path_limit', 'invalid_request', 'invalid_stream',
   'stream_timeout', 'stream_closed', 'stream_interrupted', 'host_unavailable']);
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const RELAY_HOST_BUNDLE = 'com.factory.applets.host';
 
-export class Failure extends Error {}
+export { Failure, validTarget };
 
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const sameKeys = (value, keys) => plain(value) && Object.keys(value).sort().join() === [...keys].sort().join();
 const integer = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
-const validBundle = value => typeof value === 'string' && value.length <= 255 && /^[A-Za-z0-9._-]*$/.test(value);
-
-export function validTarget(target) {
-  if (!plain(target)) return false;
-  if (target.kind === 'desktop') {
-    return sameKeys(target, ['kind', 'displayId', 'displayUUID']) && integer(target.displayId, 1, 0xffffffff) &&
-      typeof target.displayUUID === 'string' && UUID.test(target.displayUUID);
-  }
-  return sameKeys(target, ['windowId', 'pid', 'bundleId']) && integer(target.windowId, 1, 0xffffffff) &&
-    integer(target.pid, 1, 0x7fffffff) && validBundle(target.bundleId) && target.bundleId !== RELAY_HOST_BUNDLE;
-}
 
 /** Same request contract as the Mac stream supervisor: one line, exact keys, bounded values. */
 export function parseRequest(line) {
@@ -52,37 +38,10 @@ export function parseRequest(line) {
   return request;
 }
 
-/** Reads the lease state the helper writes; read-only, and anything unreadable or malformed is unsafe_state. */
-export function readState(root) {
-  const file = path.join(root, 'state.json');
-  let raw;
-  try {
-    const info = lstatSync(file, { throwIfNoEntry: false });
-    if (!info) return { generation: 0, lease: null };
-    if (!info.isFile() || info.nlink !== 1 || info.size > STATE_LIMIT_BYTES ||
-        (process.getuid && (info.uid !== process.getuid() || (info.mode & 0o077)))) throw new Failure('unsafe_state');
-    raw = readFileSync(file, 'utf8');
-  } catch (error) {
-    throw error instanceof Failure ? error : new Failure('unsafe_state');
-  }
-  if (!raw) return { generation: 0, lease: null };
-  let state;
-  try { state = JSON.parse(raw); } catch { throw new Failure('unsafe_state'); }
-  const lease = state?.lease;
-  if (!sameKeys(state, ['generation', 'lease']) || !integer(state.generation, 0, 2 ** 53 - 2) ||
-      (lease !== null && !(sameKeys(lease, ['owner', 'token', 'expiresAt']) && typeof lease.owner === 'string' &&
-        /^[a-f0-9]{64}$/.test(lease.token) && Number.isFinite(lease.expiresAt)))) throw new Failure('unsafe_state');
-  return state;
-}
-
+/** Windows and diagnose are read-only and accept any lease of the owner; a stream must hold the lease of its own target. */
 export function authorize(root, request, nowSeconds = Date.now() / 1000) {
-  if (existsSync(path.join(root, 'inflight')) || existsSync(path.join(root, 'bridge-session.json'))) throw new Failure('busy');
-  const state = readState(root);
-  const { lease } = state;
-  const proof = request.args.lease;
-  if (lease === null || proof.generation !== state.generation || request.owner !== lease.owner ||
-      !timingSafeEqual(Buffer.from(proof.token), Buffer.from(lease.token))) throw new Failure('stale_lease');
-  if (lease.expiresAt <= nowSeconds) throw new Failure('lease_expired');
+  const { owner, args: { lease }, mode, target } = request;
+  return authorizeLease(root, { owner, lease, ...(mode === 'stream' ? { target } : {}) }, nowSeconds);
 }
 
 /** Byte queue over a stream with deadlines; pauses the source while a consumer is behind. */
@@ -236,6 +195,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.stderr.write('APPLETS_STREAM_ERROR:' + failureCode(error) + '\n', () => process.exit(1));
   };
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(signal, () => fail(new Failure('stream_interrupted')));
-  if (process.argv[2] !== 'stream') fail(new Failure('invalid_request'));
+  if (process.argv[2] === 'helper') runHelper().then(() => process.exit(0), () => process.exit(1));
+  else if (process.argv[2] !== 'stream') fail(new Failure('invalid_request'));
   else runStream().then(() => process.stdout.write('', () => process.exit(0)), fail);
 }
