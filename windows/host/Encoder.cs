@@ -107,19 +107,19 @@ public sealed partial class H264Encoder : IDisposable
     static readonly Guid MtSeqHeader = G("3c036de7-3ad0-4c9e-9216-ee6d6ac21cb3");
     static readonly Guid ApiLowLatency = G("9c27891a-ed7a-40e1-88e8-b22727a024ee"), ApiRateControl = G("1c0608e9-370c-4710-8a58-cb6181c42423"), ApiBitrate = G("f7222374-2144-4815-b550-a37f8e12ee52");
     static readonly Guid ApiBFrames = G("8d390aac-dc5c-4200-b57f-814d04babab2"), ApiGop = G("95f31b26-95a4-41aa-9303-246a7fc6eef1"), ApiForceKey = G("398c1b98-8353-475a-9ef2-8f265d260345");
-    const int MessageDrain = 1, MessageBegin = 0x10000000, MessageEnd = 0x10000002, VtBool = 11, VtUi4 = 19, FrameMultiple = 2;
-    const int ENotAccepting = unchecked((int)0xC00D36B5), ENeedMoreInput = unchecked((int)0xC00D6D72), EBufferTooSmall = unchecked((int)0xC00D36B1);
+    const int MessageDrain = 1, MessageBegin = 0x10000000, MessageEnd = 0x10000001, VtBool = 11, VtUi4 = 19, FrameMultiple = 2;
+    const int ENotAccepting = unchecked((int)0xC00D36B5), ENeedMoreInput = unchecked((int)0xC00D6D72), EBufferTooSmall = unchecked((int)0xC00D36B1), EStreamChange = unchecked((int)0xC00D6D61);
     const int EInvalidArg = unchecked((int)0x80070057), ENotImpl = unchecked((int)0x80004001), ENotFound = unchecked((int)0x80070490);
     enum State { Open, Drained, Disposed }
 
     public readonly EncoderConfig Config;
-    IMFTransform t; ICodecAPI api; State state; bool mfStarted; readonly int owner;
+    IMFTransform t; ICodecAPI api; State state; bool mfStarted; readonly int owner, fps;
     byte[] seqHeader; readonly byte[] zeros; string typeOrder; int inSize, outSize = 1 << 20, bpHr; uint outFlags;
 
     public H264Encoder(EncoderConfig config)
     {
         Validate(config);
-        Config = config; owner = Thread.CurrentThread.ManagedThreadId; zeros = new byte[config.Width * config.Height * 3 / 2];
+        Config = config; fps = config.Fps; owner = Thread.CurrentThread.ManagedThreadId; zeros = new byte[config.Width * config.Height * 3 / 2];
         try
         {
             Need("MFStartup", MFStartup(0x00020070, 0)); mfStarted = true;
@@ -161,7 +161,7 @@ public sealed partial class H264Encoder : IDisposable
         Guid k = MtMajor, v = Video; a.SetGUID(ref k, ref v);
         k = MtSub; v = h264 ? H264 : Nv12; a.SetGUID(ref k, ref v);
         k = MtFrameSize; a.SetUINT64(ref k, ((ulong)(uint)Config.Width << 32) | (uint)Config.Height);
-        k = MtFrameRate; a.SetUINT64(ref k, ((ulong)(uint)Config.Fps << 32) | 1u);
+        k = MtFrameRate; a.SetUINT64(ref k, ((ulong)(uint)fps << 32) | 1u);
         k = MtPixelAspect; a.SetUINT64(ref k, (1UL << 32) | 1u);
         k = MtInterlace; a.SetUINT32(ref k, 2);
         if (h264) { k = MtAvgBitrate; a.SetUINT32(ref k, (uint)Config.BitrateBps); k = MtProfile; a.SetUINT32(ref k, 77); }
@@ -187,7 +187,7 @@ public sealed partial class H264Encoder : IDisposable
         Need("AVLowLatencyMode", SetApi(ApiLowLatency, VtBool, 0xFFFF));
         if (SetApi(ApiRateControl, VtUi4, 0) != 0) Need("AVEncCommonRateControlMode", SetApi(ApiRateControl, VtUi4, 4));
         Need("AVEncCommonMeanBitRate", SetApi(ApiBitrate, VtUi4, (ulong)Config.BitrateBps));
-        Need("AVEncMPVGOPSize", SetApi(ApiGop, VtUi4, (ulong)Config.Fps * 600));
+        Need("AVEncMPVGOPSize", SetApi(ApiGop, VtUi4, (ulong)fps * 600));
         // The NVIDIA MFT answers E_INVALIDARG here; the software MFT is the only one in this slice but stays tolerant.
         bpHr = SetApi(ApiBFrames, VtUi4, 0);
         if (bpHr != 0 && bpHr != EInvalidArg && bpHr != ENotImpl && bpHr != ENotFound) Need("AVEncMPVDefaultBPictureCount", bpHr);
@@ -253,7 +253,12 @@ public sealed partial class H264Encoder : IDisposable
             }
             Need("MFCreateSample", MFCreateSample(out sp));
             IMFSample s = (IMFSample)Marshal.GetObjectForIUnknown(sp);
-            s.AddBuffer(buf); s.SetSampleTime(ptsHns); s.SetSampleDuration(10000000L / Config.Fps); Marshal.ReleaseComObject(s);
+            try
+            {
+                Need("AddBuffer", s.AddBuffer(buf)); Need("SetSampleTime", s.SetSampleTime(ptsHns)); Need("SetSampleDuration", s.SetSampleDuration(10000000L / fps));
+            }
+            catch { Marshal.Release(sp); throw; }
+            finally { Marshal.ReleaseComObject(s); }
             return sp;
         }
         finally { Marshal.Release(buf); }
@@ -304,7 +309,8 @@ public sealed partial class H264Encoder : IDisposable
     // One ProcessOutput round. False means the MFT wants more input.
     bool Output(List<AccessUnit> result)
     {
-        for (int tries = 0; ; tries++)
+        int tries = 0, changes = 0;
+        for (; ; tries++)
         {
             var odb = new MftOutputDataBuffer(); IntPtr own = IntPtr.Zero;
             if ((outFlags & 0x100) == 0) { own = NewSample(outSize, null, 0); odb.Sample = own; }
@@ -317,6 +323,7 @@ public sealed partial class H264Encoder : IDisposable
             }
             if (own != IntPtr.Zero) Marshal.Release(own);
             if (hr == ENeedMoreInput) return false;
+            if (hr == EStreamChange && ++changes <= 4) { Renegotiate(); continue; }
             if (hr == EBufferTooSmall && tries < 8 && outSize < (64 << 20)) { outSize *= 2; continue; }
             throw new EncoderException("ProcessOutput", hr, "output failed");
         }
@@ -336,6 +343,12 @@ public sealed partial class H264Encoder : IDisposable
             if (len > 0) { Need("IMFMediaBuffer::Lock", b.Lock(out p, out max, out cur)); try { Marshal.Copy(p, data, 0, (int)len); } finally { b.Unlock(); } }
         }
         finally { Marshal.ReleaseComObject(b); Marshal.Release(bp); Marshal.ReleaseComObject(s); }
+        return Finish(data, pts, seqHeader);
+    }
+
+    // Validates one access unit and puts the sequence header in front of an IDR that lacks SPS/PPS.
+    internal static AccessUnit Finish(byte[] data, long pts, byte[] seqHeader)
+    {
         bool idr, ps; Scan(data, out idr, out ps);
         if (data.Length < 4 || data[0] != 0 || data[1] != 0 || (data[2] != 1 && (data[2] != 0 || data[3] != 1))) throw new EncoderException("ProcessOutput", 0, "access unit is not Annex-B");
         bool prepended = false;

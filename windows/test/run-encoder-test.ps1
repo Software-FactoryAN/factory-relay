@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $fw = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\'
 New-Item -ItemType Directory -Force $Out | Out-Null
-& ($fw + 'csc.exe') /nologo /optimize+ /target:exe /platform:x64 /out:$Out\EncoderSelfTest.exe "$here\..\host\Encoder.cs" "$here\EncoderSelfTest.cs"
+& ($fw + 'csc.exe') /nologo /optimize+ /target:exe /platform:x64 /out:$Out\EncoderSelfTest.exe "$here\..\host\Encoder.cs" "$here\..\host\EncoderSettings.cs" "$here\EncoderSelfTest.cs"
 if ($LASTEXITCODE -ne 0) { throw "csc exit $LASTEXITCODE" }
 & $Out\EncoderSelfTest.exe $Out\h1.h264
 if ($LASTEXITCODE -ne 0) { throw "EncoderSelfTest exit $LASTEXITCODE" }
