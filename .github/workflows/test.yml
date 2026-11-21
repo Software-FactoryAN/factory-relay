@@ -3,6 +3,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
+    types: [checks_requested]
 permissions:
   contents: read
 jobs:
@@ -16,3 +18,23 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm ci
       - run: npm test
+
+  # The one check a ruleset requires for the merge queue. Fails unless every
+  # needed job succeeded; a skipped, cancelled or failed job is red.
+  ci-gate:
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Verdict
+        env:
+          TEST: ${{ needs.test.result }}
+        run: |
+          echo "test: $TEST"
+          if [ "$TEST" != success ]; then
+            echo "ci-gate: FAIL, job test is '$TEST', not success"
+            exit 1
+          fi
+          echo "ci-gate: PASS"
