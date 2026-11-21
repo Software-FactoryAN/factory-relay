@@ -80,9 +80,11 @@ static class Capture
         Direct3D11CaptureFrame slot;
         long slotTicks;
         public int Replaced;
+        public readonly int Width, Height;
 
         public Grabber(IDirect3DDevice device, GraphicsCaptureItem item)
         {
+            Width = item.Size.Width; Height = item.Size.Height;
             pool = Direct3D11CaptureFramePool.CreateFreeThreaded(device, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2, item.Size);
             pool.FrameArrived += new Windows.Foundation.TypedEventHandler<Direct3D11CaptureFramePool, object>(OnArrived);
             session = pool.CreateCaptureSession(item);
@@ -198,6 +200,8 @@ static class Capture
             var result = new Observation();
             using (Direct3D11CaptureFrame frame = grabber.Take(start, out arrived))
             {
+                // The pool keeps the size it was created with; a resized window would come back cropped or padded, so it is refused.
+                if (frame.ContentSize.Width != grabber.Width || frame.ContentSize.Height != grabber.Height) throw new Exception("window size changed since the session started");
                 result.CaptureMs = Ms(arrived - start);
                 // QPC arrival minus SystemRelativeTime. Measured about -15 ms on a cold session's first frame, so the frame time can lie ahead of
                 // the QPC read; a packet's send time must be stamped after this and the pair checked before it is sent.
@@ -221,7 +225,8 @@ static class Capture
     {
         var sorted = new List<double>(values);
         sorted.Sort();
-        return "\"" + name + "\":{\"p50\":" + N(Pct(sorted, 0.5)) + ",\"p95\":" + N(Pct(sorted, 0.95)) + ",\"max\":" + N(sorted.Count == 0 ? double.NaN : sorted[sorted.Count - 1]) + "}";
+        if (sorted.Count == 0) return "\"" + name + "\":{\"p50\":null,\"p95\":null,\"max\":null}";
+        return "\"" + name + "\":{\"p50\":" + N(Pct(sorted, 0.5)) + ",\"p95\":" + N(Pct(sorted, 0.95)) + ",\"max\":" + N(sorted[sorted.Count - 1]) + "}";
     }
 
     static int Main(string[] argv)
